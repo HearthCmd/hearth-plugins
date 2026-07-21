@@ -1,0 +1,14 @@
+# Release artifacts. Built by scripts/release.sh and uploaded to a GitHub
+# release; never committed. A committed index.json can silently drift from
+# the manifests it describes, which is exactly the failure the hashes exist
+# to prevent.
+dist/
+index.json
+index.json.sig
+catalog.tar.gz
+
+# Signing keys must never live in the repo. The catalog private key stays in
+# cold storage on an operator machine and is passed by path via
+# HEARTH_CATALOG_SIGNING_KEY at release time.
+*.pem
+*.key
