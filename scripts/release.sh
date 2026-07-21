@@ -52,19 +52,50 @@ tar --sort=name \
     -czf "$DIST/catalog.tar.gz" \
     plugins
 
+# Signing deliberately does NOT happen here. The private key lives in cold
+# storage on the signing machine; wiring signing into the build would mean
+# copying it onto whatever box runs this, which is exactly what cold storage
+# is meant to prevent. If the key happens to be on this machine anyway, sign
+# now as a convenience -- but the default assumption is that it is not.
 echo "==> signing"
-if [[ -x scripts/sign-index.sh ]] && [[ -n "${HEARTH_CATALOG_SIGNING_KEY:-}" ]]; then
-  scripts/sign-index.sh "$DIST/index.json" "$DIST/index.json.sig"
+if [[ -n "${HEARTH_CATALOG_SIGNING_KEY:-}" && -f "${HEARTH_CATALOG_SIGNING_KEY}" ]]; then
+  scripts/sign-index.sh "$DIST/index.json" "$HEARTH_CATALOG_SIGNING_KEY" "$DIST/index.json.sig"
 else
-  echo "    SKIPPED: no signing key configured."
-  echo "    Set HEARTH_CATALOG_SIGNING_KEY to the private key path (phase 1b)."
-  echo "    Until then the CLI accepts an unsigned catalog only when built"
-  echo "    with signature verification disabled -- never in a release build."
+  echo "    not signing here (no HEARTH_CATALOG_SIGNING_KEY on this machine)."
+  echo "    Sign on the machine holding the key, then upload the .sig:"
+  echo "        scripts/sign-index.sh index.json <key> index.json.sig"
+  echo
+  echo "    A release binary REFUSES an unsigned catalog. Publishing without"
+  echo "    index.json.sig makes this release uninstallable by real builds."
 fi
 
 echo
 echo "artifacts in dist/:"
 ls -la "$DIST"
 echo
-echo "Next: create a GitHub release tagged '$CATALOG_VERSION' and upload"
-echo "every file in dist/ as a release asset."
+
+# The git tag and the catalog_version baked into index.json are independent
+# strings, and nothing downstream reconciles them. If they drift, the index
+# claims one version while the release it ships from says another -- silently,
+# and after the fact there is no way to tell which was intended. So the tag is
+# named here explicitly rather than left as an exercise.
+if git rev-parse -q --verify "refs/tags/$CATALOG_VERSION" >/dev/null; then
+  echo "Tag '$CATALOG_VERSION' already exists locally."
+  if ! git ls-remote --exit-code --tags origin "$CATALOG_VERSION" >/dev/null 2>&1; then
+    echo "It is NOT on origin yet:"
+    echo "    git push origin $CATALOG_VERSION"
+  fi
+else
+  echo "This script does not tag. Create it -- the tag MUST match the"
+  echo "catalog_version above, or index.json and the release disagree:"
+  echo
+  echo "    git tag $CATALOG_VERSION && git push origin $CATALOG_VERSION"
+  echo
+  echo "(or type '$CATALOG_VERSION' in the tag box on the New Release page"
+  echo " and let GitHub create it on publish)"
+fi
+
+echo
+echo "Then create a GitHub release on tag '$CATALOG_VERSION' and upload"
+echo "every file in dist/ as a release asset. The CLI resolves these by"
+echo "exact filename via /releases/latest/download/<name>, so do not rename."

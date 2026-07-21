@@ -81,9 +81,9 @@ manifests it claims to describe.
 scripts/release.sh 2026.07.21
 ```
 
-That writes `dist/index.json`, `dist/catalog.tar.gz`, and (once signing is
-wired up) `dist/index.json.sig`. Create a GitHub release on the tag and upload
-all three.
+That writes `dist/index.json` and `dist/catalog.tar.gz`. Sign the index (see
+below), then create a GitHub release on the tag and upload all three files.
+The CLI resolves them by exact filename, so don't rename them.
 
 Both artifacts are **reproducible**: the index has sorted keys and no
 timestamp, and the tarball is built with a fixed mtime and owner. Rebuilding
@@ -121,6 +121,88 @@ Per-file signatures would not, because every old file remains validly signed.
 The CLI additionally cross-checks the index's `version` against the extracted
 `manifest.yaml` and refuses on mismatch, so a bad index build fails loudly
 instead of installing something mislabelled.
+
+---
+
+## Signing
+
+TLS proves you reached github.com. It does not prove github.com served what we
+published — a compromised repo, a stolen credential, or a bad upload all serve
+perfectly valid TLS. The signature closes that gap, and it is the only reason
+`hearth plugin install <name>` is meaningfully safer than piping a URL into a
+shell.
+
+`index.json` is signed with Ed25519. `index.json.sig` is the raw 64-byte
+detached signature. Because the index carries a hash of every published file,
+one signature covers the whole catalog.
+
+### Setup, once
+
+Requires real OpenSSL — macOS ships LibreSSL, which cannot do Ed25519:
+
+```bash
+brew install openssl@3
+scripts/keygen.sh          # writes to ~/hearth-plugin-signing-keys/
+```
+
+That writes two files:
+
+| File | | |
+|---|---|---|
+| `hearth-catalog-signing.key` | **private** | mode 0600, cold storage |
+| `hearth-catalog-signing.pub` | public | safe to share |
+
+and prints the **public** key as hex. That hex is meant to be published — it
+is compiled into every hearth binary. Paste it into hearth-cmd's
+`cli/plugin_catalog_verify.go`:
+
+```go
+var trustedCatalogKeys = []string{
+    "…hex…",
+}
+```
+
+**The private key is the whole security model.** Anyone holding it can publish
+a catalog every hearth binary installs without question. It must never exist
+on the relay server, on a build box, in CI, or in this repo. Generate it where
+it will live so it never has to travel.
+
+### Each release
+
+Signing is deliberately not part of `release.sh`: the build runs wherever the
+repo lives, the key lives in cold storage somewhere else, and wiring them
+together would mean copying the key onto the build box.
+
+```bash
+# on the build machine
+scripts/release.sh 2026.07.21
+#   → copy dist/index.json and dist/catalog.tar.gz to the signing machine
+
+# on the signing machine
+scripts/sign-index.sh index.json ~/hearth-plugin-signing-keys/hearth-catalog-signing.key
+#   → upload index.json, index.json.sig, catalog.tar.gz to the release
+```
+
+`sign-index.sh` verifies what it just produced before handing it back — a
+signature that doesn't check out is worth catching before publication, not
+after every host starts refusing to install.
+
+### Rotation
+
+**Rotation is a two-release process, not a swap.** The trusted keys are
+compiled into each binary, so:
+
+1. Ship a hearth release trusting **both** the old and new keys.
+2. Wait for it to propagate. Binaries that never update keep trusting only
+   the old key.
+3. Ship a release trusting only the new key.
+
+Signing with a key that isn't in a host's binary makes the catalog
+uninstallable for that host, which is why step 1 cannot be skipped.
+
+The honest limitation: there is **no revocation channel**. A binary trusting a
+compromised key keeps trusting it until it updates. The lever that forces
+updates is the server-side `HEARTH_MIN_CLI` gate.
 
 ---
 
