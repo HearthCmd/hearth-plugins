@@ -66,5 +66,29 @@ echo
 echo "artifacts in dist/:"
 ls -la "$DIST"
 echo
-echo "Next: create a GitHub release tagged '$CATALOG_VERSION' and upload"
-echo "every file in dist/ as a release asset."
+
+# The git tag and the catalog_version baked into index.json are independent
+# strings, and nothing downstream reconciles them. If they drift, the index
+# claims one version while the release it ships from says another -- silently,
+# and after the fact there is no way to tell which was intended. So the tag is
+# named here explicitly rather than left as an exercise.
+if git rev-parse -q --verify "refs/tags/$CATALOG_VERSION" >/dev/null; then
+  echo "Tag '$CATALOG_VERSION' already exists locally."
+  if ! git ls-remote --exit-code --tags origin "$CATALOG_VERSION" >/dev/null 2>&1; then
+    echo "It is NOT on origin yet:"
+    echo "    git push origin $CATALOG_VERSION"
+  fi
+else
+  echo "This script does not tag. Create it -- the tag MUST match the"
+  echo "catalog_version above, or index.json and the release disagree:"
+  echo
+  echo "    git tag $CATALOG_VERSION && git push origin $CATALOG_VERSION"
+  echo
+  echo "(or type '$CATALOG_VERSION' in the tag box on the New Release page"
+  echo " and let GitHub create it on publish)"
+fi
+
+echo
+echo "Then create a GitHub release on tag '$CATALOG_VERSION' and upload"
+echo "every file in dist/ as a release asset. The CLI resolves these by"
+echo "exact filename via /releases/latest/download/<name>, so do not rename."
