@@ -65,7 +65,13 @@ if [[ -e "$KEY" ]]; then
   exit 1
 fi
 
+# umask before mkdir so a freshly created key directory is 0700 rather than
+# whatever the login shell's default would give it. An existing directory
+# keeps its own permissions -- changing them silently would be worse than
+# leaving a choice the operator already made.
 umask 077
+mkdir -p "$OUT_DIR"
+
 "$SSL" genpkey -algorithm ED25519 -out "$KEY"
 chmod 600 "$KEY"
 "$SSL" pkey -in "$KEY" -pubout -out "$PUB"
