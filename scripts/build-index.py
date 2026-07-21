@@ -97,6 +97,48 @@ def discover_plugins():
             yield "%s/%s" % (namespace, name), plugin_dir
 
 
+def validate_verbs(slug, manifest):
+    """Check the verb block the way the daemon's ValidateManifest will.
+
+    This repo is now the only home for first-party manifests, so this script
+    is the last gate before publishing. It used to be backed up by Go tests in
+    the monorepo that read the same files; those went away with the copy they
+    read, so what they checked has to happen here instead.
+
+    Deliberately mirrors the daemon's rules rather than inventing looser ones:
+    a manifest that passes here and fails at install would be a catalog that
+    publishes plugins nobody can install.
+    """
+    verbs = manifest.get("verbs") or []
+    if not verbs:
+        # Legal but almost certainly a mistake in a published plugin.
+        print("  warning: %s declares no verbs" % slug)
+        return
+
+    seen = set()
+    for i, verb in enumerate(verbs):
+        if not isinstance(verb, dict):
+            sys.exit("%s: verbs[%d] is not a mapping" % (slug, i))
+        name = verb.get("name")
+        if not name:
+            sys.exit("%s: verbs[%d] has no name" % (slug, i))
+        # Duplicate verb names are ambiguous everywhere downstream: IAM rules
+        # are keyed on external_resource.<slug>.<verb>, so two verbs sharing a
+        # name cannot be granted independently.
+        if name in seen:
+            sys.exit("%s: duplicate verb name %r" % (slug, name))
+        seen.add(name)
+
+        http = verb.get("http")
+        if http is None:
+            sys.exit("%s: verb %r has no http: block. Only declarative plugins "
+                     "may be published here." % (slug, name))
+        if not http.get("method"):
+            sys.exit("%s: verb %r is missing http.method" % (slug, name))
+        if not http.get("url"):
+            sys.exit("%s: verb %r is missing http.url" % (slug, name))
+
+
 def build_entry(slug, plugin_dir):
     with open(os.path.join(plugin_dir, "manifest.yaml")) as f:
         manifest = yaml.safe_load(f)
@@ -126,6 +168,8 @@ def build_entry(slug, plugin_dir):
         sys.exit("%s: declares an executable. Only declarative plugins may be "
                  "published to this catalog; binary plugins install from a "
                  "local archive, where a human handled the file." % slug)
+
+    validate_verbs(slug, manifest)
 
     files = {}
     for filename in PUBLISHED_FILES:
