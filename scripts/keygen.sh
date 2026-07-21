@@ -12,16 +12,20 @@
 # Usage:
 #   scripts/keygen.sh [output_dir]
 #
-# Produces, in output_dir (default: current directory):
+# Produces, in output_dir (default: ~/hearth-plugin-signing-keys):
 #   hearth-catalog-signing.key   PRIVATE — cold storage, mode 0600
 #   hearth-catalog-signing.pub   public   — safe to share
 #
-# and prints the hex public key to paste into hearth-cmd's
+# and prints the hex PUBLIC key to paste into hearth-cmd's
 # cli/plugin_catalog_verify.go trustedCatalogKeys.
 
 set -euo pipefail
 
-OUT_DIR="${1:-.}"
+# Defaulting to the current directory would drop a private key into whatever
+# tree you happened to be standing in -- most likely this repo. Default to a
+# named directory under $HOME instead, so the location is deliberate and
+# obvious in a file listing a year from now.
+OUT_DIR="${1:-$HOME/hearth-plugin-signing-keys}"
 KEY="$OUT_DIR/hearth-catalog-signing.key"
 PUB="$OUT_DIR/hearth-catalog-signing.pub"
 
@@ -83,10 +87,18 @@ HEX="$("$SSL" pkey -pubin -in "$PUB" -outform DER | tail -c 32 | xxd -p -c 64)"
 
 cat <<EOF
 
-  private key: $KEY   (0600 — COLD STORAGE, never commit, never copy to a server)
-  public key:  $PUB
+  PRIVATE KEY  $KEY
+               mode 0600. Never commit it, never copy it to a server or a
+               build box, never paste it anywhere. Anyone holding this can
+               publish a catalog every hearth binary installs without
+               question.
 
-Pin this in hearth-cmd, cli/plugin_catalog_verify.go:
+  public key   $PUB
+               Safe to share.
+
+The hex below is the PUBLIC key — not the private one. It is meant to be
+published: it gets compiled into every hearth binary, in a public repo.
+Paste it into hearth-cmd, cli/plugin_catalog_verify.go:
 
     var trustedCatalogKeys = []string{
         "$HEX",

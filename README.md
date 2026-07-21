@@ -142,10 +142,18 @@ Requires real OpenSSL — macOS ships LibreSSL, which cannot do Ed25519:
 
 ```bash
 brew install openssl@3
-scripts/keygen.sh ~/secure/
+scripts/keygen.sh          # writes to ~/hearth-plugin-signing-keys/
 ```
 
-That prints the public key as hex. Paste it into hearth-cmd's
+That writes two files:
+
+| File | | |
+|---|---|---|
+| `hearth-catalog-signing.key` | **private** | mode 0600, cold storage |
+| `hearth-catalog-signing.pub` | public | safe to share |
+
+and prints the **public** key as hex. That hex is meant to be published — it
+is compiled into every hearth binary. Paste it into hearth-cmd's
 `cli/plugin_catalog_verify.go`:
 
 ```go
@@ -171,7 +179,7 @@ scripts/release.sh 2026.07.21
 #   → copy dist/index.json and dist/catalog.tar.gz to the signing machine
 
 # on the signing machine
-scripts/sign-index.sh index.json ~/secure/hearth-catalog-signing.key
+scripts/sign-index.sh index.json ~/hearth-plugin-signing-keys/hearth-catalog-signing.key
 #   → upload index.json, index.json.sig, catalog.tar.gz to the release
 ```
 
