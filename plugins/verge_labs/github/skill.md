@@ -127,14 +127,14 @@ hearth resource invoke github-work create_pull_request '{
 
 ## Code review
 
-`add_pr_review_comment` submits a review, not just a comment. Three event types:
+`add_pull_request_review_comment` submits a review, not just a comment. Three event types:
 
 - `COMMENT` — general feedback, no approval signal
 - `APPROVE` — signals the PR is ready to merge
 - `REQUEST_CHANGES` — blocks merge until addressed
 
 ```
-hearth resource invoke github-work add_pr_review_comment '{
+hearth resource invoke github-work add_pull_request_review_comment '{
   "number": 17,
   "event": "APPROVE",
   "body": "LGTM"

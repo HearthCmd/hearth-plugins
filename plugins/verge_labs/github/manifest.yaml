@@ -6,7 +6,7 @@ description: |
   Read and write GitHub issues, pull requests, files, and commits via the
   GitHub REST API. One connection = one primary owner/repo. For multiple
   repos create multiple connections backed by the same plugin type.
-version: 0.1.1
+version: 0.1.2
 manifest_schema: 2
 
 config_schema:
@@ -378,7 +378,7 @@ verbs:
       response:
         success_status: [201]
 
-  - name: add_pr_review_comment
+  - name: add_pull_request_review_comment
     description: |
       Submit a review on a pull request. Required args: number (PR number),
       body (review summary), event (APPROVE / REQUEST_CHANGES / COMMENT).
@@ -462,5 +462,5 @@ default_rules:
     decision: ask
   - action: external_resource.verge_labs/github.open_issue
     decision: ask
-  - action: external_resource.verge_labs/github.add_pr_review_comment
+  - action: external_resource.verge_labs/github.add_pull_request_review_comment
     decision: ask
