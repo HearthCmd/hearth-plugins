@@ -299,7 +299,7 @@ verbs:
       response:
         success_status: [200]
 
-  - name: open_issue
+  - name: reopen_issue
     description: |
       Reopen a closed issue by number. Sets state to "open".
     grant_categories: [write, issues]
@@ -460,7 +460,7 @@ default_rules:
     decision: ask
   - action: external_resource.verge_labs/github.close_issue
     decision: ask
-  - action: external_resource.verge_labs/github.open_issue
+  - action: external_resource.verge_labs/github.reopen_issue
     decision: ask
   - action: external_resource.verge_labs/github.add_pull_request_review_comment
     decision: ask
