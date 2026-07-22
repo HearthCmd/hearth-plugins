@@ -6,7 +6,7 @@ description: |
   Read and write GitHub issues, pull requests, files, and commits via the
   GitHub REST API. One connection = one primary owner/repo. For multiple
   repos create multiple connections backed by the same plugin type.
-version: 0.1.2
+version: 0.1.3
 manifest_schema: 2
 
 config_schema:
@@ -299,7 +299,7 @@ verbs:
       response:
         success_status: [200]
 
-  - name: open_issue
+  - name: reopen_issue
     description: |
       Reopen a closed issue by number. Sets state to "open".
     grant_categories: [write, issues]
@@ -460,7 +460,7 @@ default_rules:
     decision: ask
   - action: external_resource.verge_labs/github.close_issue
     decision: ask
-  - action: external_resource.verge_labs/github.open_issue
+  - action: external_resource.verge_labs/github.reopen_issue
     decision: ask
   - action: external_resource.verge_labs/github.add_pull_request_review_comment
     decision: ask

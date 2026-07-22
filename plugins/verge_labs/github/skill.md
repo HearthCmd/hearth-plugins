@@ -85,7 +85,7 @@ Use the dedicated verbs for state-only changes:
 
 ```
 hearth resource invoke github-work close_issue '{"number":42}'
-hearth resource invoke github-work open_issue '{"number":42}'
+hearth resource invoke github-work reopen_issue '{"number":42}'
 ```
 
 ### Updating issue fields
