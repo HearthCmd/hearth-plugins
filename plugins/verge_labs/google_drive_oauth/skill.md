@@ -2,8 +2,9 @@
 name: google_drive_oauth
 description: >
   Use when reading or writing files in a Google Drive account via a
-  hearth resource connection. Covers listing, searching, downloading,
-  uploading, and organising files through the google_drive_oauth plugin.
+  hearth resource connection — including editing the contents of native
+  Google Docs, Sheets, and Slides. Covers listing, searching, downloading,
+  uploading, organising, and editing files through the google_drive_oauth plugin.
 ---
 
 # Google Drive plugin
@@ -195,6 +196,124 @@ Roles: `reader`, `commenter`, `writer`, `fileOrganizer`, `organizer`, `owner`.
 
 `email_address` is required on every `share_file` call — pass an empty string
 when `type` is `anyone`.
+
+## Editing Google Docs, Sheets & Slides
+
+Beyond storing files, this plugin edits the *contents* of native Google
+Workspace files through the Docs, Sheets, and Slides APIs. The verbs are
+prefixed by type: `doc_*`, `sheet_*`, `slides_*`.
+
+You can edit any Doc, Sheet, or Slides file the user shares with you by link —
+paste the file's ID into the relevant verb. You can also create a fresh file
+and edit it:
+
+```
+# Create an empty Google Doc, capture its id from the response
+hearth resource invoke my_drive create_file '{"name":"Neighbor letter","mime_type":"application/vnd.google-apps.document"}'
+# Edit it by that id
+hearth resource invoke my_drive doc_append_text '{"document_id":"<id>","text_json":"\"Dear neighbor,\\n\\nThanks for ...\""}'
+```
+
+(create_file's `parent_id` is optional — omit it to land in the connection's
+base folder.)
+
+### The `_json` text rule — read this first
+
+Editing request bodies are assembled as raw JSON and the engine does **not**
+escape your values. So every free-text field is passed as a `_json` argument
+whose value is the **JSON encoding** of your text — i.e. run the text through a
+JSON string encoder, surrounding quotes included. The plain word `Hello`
+becomes the value `"Hello"`; multi-line text keeps its `\n` escapes. This lets
+your content carry quotes, newlines, and Unicode safely. Spreadsheet data uses
+the same rule via `values_json` (a JSON-encoded 2D array of rows).
+
+Concretely, to append the two lines `Dear neighbor,` / `Thanks for ...` you set
+`text_json` to `"Dear neighbor,\n\nThanks for ..."` — which, once that value is
+itself placed inside the argument object, appears as the doubly-escaped
+`"\"Dear neighbor,\\n\\nThanks for ...\""` shown above. When in doubt, JSON-
+encode the text once and let the argument object's own JSON quoting stack on
+top.
+
+### Google Docs
+
+To READ a Doc's text, prefer `export_file` (Doc → text/plain) when Hearth
+created the file; for a file the user shared, use `doc_get` (it returns the full
+structured document — also the source of the character indices for precise
+edits).
+
+```
+# Append text to the end of the doc
+hearth resource invoke my_drive doc_append_text '{"document_id":"<id>","text_json":"\"\\n## Next steps\\n\""}'
+
+# Fill a placeholder throughout the doc (case-sensitive find/replace)
+hearth resource invoke my_drive doc_replace_text '{"document_id":"<id>","find_json":"\"[[NAME]]\"","replace_json":"\"Jane Doe\""}'
+
+# Delete text by replacing it with the empty string
+hearth resource invoke my_drive doc_replace_text '{"document_id":"<id>","find_json":"\"DRAFT — \"","replace_json":"\"\""}'
+```
+
+`doc_replace_text` is the workhorse for template documents: author a Doc with
+`[[PLACEHOLDER]]` tokens, then replace each one.
+
+### Google Sheets
+
+`range` is A1 notation, e.g. `Sheet1!A1:D100`. If a tab name contains spaces or
+punctuation, percent-encode the range (space → `%20`, `'` → `%27`); simple
+ranges need no encoding.
+
+```
+# Discover the tab names first
+hearth resource invoke my_drive sheet_get '{"spreadsheet_id":"<id>"}'
+
+# Read a range
+hearth resource invoke my_drive sheet_read_range '{"spreadsheet_id":"<id>","range":"Sheet1!A1:C10"}'
+
+# Overwrite a range (values_json is a JSON 2D array of rows)
+hearth resource invoke my_drive sheet_update_range '{"spreadsheet_id":"<id>","range":"Sheet1!A1","values_json":"[[\"Item\",\"Qty\"],[\"Bolts\",40]]"}'
+
+# Append rows to the bottom of a table
+hearth resource invoke my_drive sheet_append_rows '{"spreadsheet_id":"<id>","range":"Sheet1!A1","values_json":"[[\"Nuts\",100]]"}'
+
+# Clear a range's values (formatting is kept)
+hearth resource invoke my_drive sheet_clear_range '{"spreadsheet_id":"<id>","range":"Sheet1!A2:C99"}'
+
+# Add a new tab
+hearth resource invoke my_drive sheet_add_tab '{"spreadsheet_id":"<id>","title":"2026 Budget"}'
+```
+
+Values are interpreted as if typed into the UI: `42` becomes a number,
+`2026-01-01` a date, and a string starting with `=` a formula. For update and
+append, the range's top-left cell is just the anchor — you don't need to size
+the range to the data.
+
+### Google Slides
+
+```
+# Inspect slides and their element objectIds
+hearth resource invoke my_drive slides_get '{"presentation_id":"<id>"}'
+
+# Fill placeholders across the whole deck (great for template decks)
+hearth resource invoke my_drive slides_replace_text '{"presentation_id":"<id>","find_json":"\"{{CLIENT}}\"","replace_json":"\"The Smiths\""}'
+
+# Add a slide (layout optional; defaults to TITLE_AND_BODY)
+hearth resource invoke my_drive slides_add_slide '{"presentation_id":"<id>","layout":"TITLE_ONLY"}'
+```
+
+To put fresh text on a new slide, add the slide, then either run
+`slides_replace_text` against its layout placeholder text, or read `slides_get`
+for the new text box's objectId.
+
+### What you can reach
+
+- **Docs / Sheets / Slides**: read and edit **any** such file the user shares
+  by link — the `doc_*`/`sheet_*`/`slides_*` verbs cover pre-existing files, not
+  just ones Hearth created.
+- **General Drive operations** (`list_files`, `search_files`,
+  `get_file_metadata`, `download_file`, `export_file`, `create_file`, `move`,
+  `trash`, `share`) are limited to files **Hearth created**. So `search_files`
+  and `list_files` only surface Hearth's own files — if the user wants you to
+  work on one of their existing files, **ask them for its link** rather than
+  trying to search for it.
 
 ## File IDs vs names
 
