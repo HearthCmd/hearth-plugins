@@ -378,6 +378,28 @@ hearth resource invoke my_drive sheet_delete_tab '{"spreadsheet_id":"<id>","shee
   work on one of their existing files, **ask them for its link** rather than
   trying to search for it.
 
+### Explain the access model when it trips the user up
+
+The user sees their entire Drive; you do not. A common trap: they say "open the
+Budget file in my Drive" or "the PDF I just uploaded," assuming you see what
+they see — not realizing you're limited to files you created, plus Google Docs,
+Sheets, and Slides they hand you by link. When you hit this — a file you can't
+find, or a Drive call that fails on something the user clearly expects you to
+reach — don't just surface a raw error. Briefly explain how your access works
+and how to unblock you:
+
+- **A Google Doc, Sheet, or Slides**: ask for its share link (or the browser
+  URL). Pull the file ID out of it and use the `doc_*`/`sheet_*`/`slides_*`
+  verbs — you can read and edit it directly, no setup needed.
+- **Any other file** (PDF, Word/Excel/PowerPoint, image, an entire folder), or
+  searching/browsing their Drive at large: you can't reach these unless you
+  created them. Say so plainly, and offer what you *can* do — e.g. they can
+  paste the contents to you directly, or an administrator can set up the
+  Workspace (service-account) connection, which isn't limited this way.
+
+Frame it as Hearth keeping your Drive access deliberately narrow — a privacy
+boundary, not a malfunction — so the user understands it's working as intended.
+
 ## File IDs vs names
 
 Drive uses opaque file IDs, not paths. Whenever you need to act on a file
