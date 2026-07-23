@@ -58,7 +58,13 @@ URL or from a previous search result):
 hearth resource invoke someones_drive list_folder_contents '{"folder_id":"1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"}'
 ```
 
-Pass `"folder_id": "root"` for the top of My Drive.
+Pass `"folder_id": "root"` for the top of My Drive. Omit `folder_id` entirely
+to list the connection's configured base folder (or My Drive root if the
+connection has none set):
+
+```
+hearth resource invoke someones_drive list_folder_contents
+```
 
 ## Reading file content
 
@@ -102,7 +108,9 @@ this for `move_file`.
 ## Creating files
 
 `create_file` creates a metadata-only record and returns the new file's `id`.
-You must supply a `parent_id`; pass `"root"` for My Drive root.
+`parent_id` is optional: omit it to create the file in the connection's
+configured base folder (or My Drive root if none is set), or pass `"root"`
+for My Drive root explicitly.
 
 ```
 # Create an empty text file
@@ -150,7 +158,8 @@ hearth resource invoke someones_drive move_file '{
 }'
 ```
 
-Create a folder:
+Create a folder (`parent_id` optional — omit it to create inside the
+connection's base folder):
 ```
 hearth resource invoke someones_drive create_folder '{"name":"2026 Reports","parent_id":"root"}'
 ```

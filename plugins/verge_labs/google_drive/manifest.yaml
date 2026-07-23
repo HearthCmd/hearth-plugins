@@ -12,8 +12,18 @@ description: |
   verge_labs/google_drive_oauth plugin instead.
 
   One connection = one impersonated Workspace user's Drive.
-version: 0.1.1
+version: 0.1.2
 manifest_schema: 2
+
+# list_folder_contents, create_file and create_folder template
+# `{{args.x || config.root_folder_id || "root"}}`. The `||` coalesce operator
+# was added after v1.0.2; an older binary reads the whole expression as one
+# broken path and the verb errors at invocation time. Declaring the floor
+# turns that into a refusal at install time with an actionable message.
+#
+# 1.1.0 is the release that carries the plugin-catalog work; it is the first
+# tag containing `||`. If that number changes before tagging, change this too.
+min_daemon_version: 1.1.0
 
 config_schema:
   type: object
@@ -28,11 +38,12 @@ config_schema:
     root_folder_id:
       type: string
       description: |
-        Optional. Scope this connection to a specific folder. Paste the
-        folder ID from the Drive URL:
-          https://drive.google.com/drive/folders/<FOLDER_ID_HERE>
-        Leave blank to access the full Drive for the impersonated user.
-        Use "root" to explicitly target the My Drive root.
+        Optional. Set a base folder so the agent's default reads and new
+        files land inside it instead of the whole Drive. Paste the folder
+        ID from the folder's URL —
+          https://drive.google.com/drive/folders/<ID>
+        — the <ID> part. Leave blank to use the full Drive for the
+        impersonated user. Use "root" to explicitly target the My Drive root.
 
 credentials:
   - name: service_account_key
@@ -64,6 +75,9 @@ verbs:
       name, mimeType, modifiedTime, size, parents. For filtered results
       use search_files; for the contents of a specific folder use
       list_folder_contents.
+      Note: this lists across all of Drive regardless of the connection's
+      base folder — call list_folder_contents (no args) to browse the base
+      folder itself.
     grant_categories: [read]
     output: json
     http:
@@ -76,18 +90,20 @@ verbs:
 
   - name: list_folder_contents
     description: |
-      List the direct children of a folder. Required args: folder_id
+      List the direct children of a folder. Optional arg: folder_id
       (the Drive file ID of the folder, or "root" for My Drive root).
+      When folder_id is omitted, lists the connection's configured base
+      folder (root_folder_id), or My Drive root if none is set.
       Returns id, name, mimeType, modifiedTime, size.
     grant_categories: [read]
     args:
       folder_id:
         type: string
-        required: true
+        required: false
     output: json
     http:
       method: GET
-      url: "https://www.googleapis.com/drive/v3/files?q=%27{{args.folder_id}}%27+in+parents+and+trashed%3Dfalse&orderBy=name&pageSize=100&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true"
+      url: "https://www.googleapis.com/drive/v3/files?q=%27{{args.folder_id || config.root_folder_id || \"root\"}}%27+in+parents+and+trashed%3Dfalse&orderBy=name&pageSize=100&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true"
       headers:
         Authorization: "Bearer {{credentials.service_account_key.access_token}}"
       response:
@@ -183,9 +199,11 @@ verbs:
     description: |
       Create a new file with metadata only (no initial content). Returns
       the new file's id and webViewLink. To set content immediately,
-      follow with upload_file_content. Required args: name, mime_type,
-      parent_id (Drive folder ID to create in; pass "root" for My Drive
-      root). Common MIME types:
+      follow with upload_file_content. Required args: name, mime_type.
+      Optional arg: parent_id (Drive folder ID to create in; pass "root"
+      for My Drive root). When parent_id is omitted, the file is created
+      in the connection's configured base folder (root_folder_id), or My
+      Drive root if none is set. Common MIME types:
         text/plain, text/markdown, application/json,
         application/vnd.google-apps.document (Google Doc),
         application/vnd.google-apps.spreadsheet (Google Sheet).
@@ -199,7 +217,7 @@ verbs:
         required: true
       parent_id:
         type: string
-        required: true
+        required: false
     output: json
     http:
       method: POST
@@ -208,7 +226,7 @@ verbs:
         Authorization: "Bearer {{credentials.service_account_key.access_token}}"
         Content-Type: application/json
       body: |
-        {"name": "{{args.name}}", "mimeType": "{{args.mime_type}}", "parents": ["{{args.parent_id}}"]}
+        {"name": "{{args.name}}", "mimeType": "{{args.mime_type}}", "parents": ["{{args.parent_id || config.root_folder_id || "root"}}"]}
       response:
         success_status: [200]
 
@@ -291,9 +309,11 @@ verbs:
 
   - name: create_folder
     description: |
-      Create a new folder. Required args: name, parent_id (Drive folder
-      ID to create inside; pass "root" for My Drive root). Returns the
-      new folder's id and webViewLink.
+      Create a new folder. Required arg: name. Optional arg: parent_id
+      (Drive folder ID to create inside; pass "root" for My Drive root).
+      When parent_id is omitted, the folder is created inside the
+      connection's configured base folder (root_folder_id), or My Drive
+      root if none is set. Returns the new folder's id and webViewLink.
     grant_categories: [write]
     args:
       name:
@@ -301,7 +321,7 @@ verbs:
         required: true
       parent_id:
         type: string
-        required: true
+        required: false
     output: json
     http:
       method: POST
@@ -310,7 +330,7 @@ verbs:
         Authorization: "Bearer {{credentials.service_account_key.access_token}}"
         Content-Type: application/json
       body: |
-        {"name": "{{args.name}}", "mimeType": "application/vnd.google-apps.folder", "parents": ["{{args.parent_id}}"]}
+        {"name": "{{args.name}}", "mimeType": "application/vnd.google-apps.folder", "parents": ["{{args.parent_id || config.root_folder_id || "root"}}"]}
       response:
         success_status: [200]
 
