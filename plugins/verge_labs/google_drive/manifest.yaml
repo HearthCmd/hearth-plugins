@@ -4,16 +4,30 @@ author: Verge Labs
 display_name: Google Drive (Service Account)
 auth_scheme: service_account
 description: |
-  Read and write files in Google Drive via the Drive REST API v3.
+  Read and write files in Google Drive — including editing native Google
+  Docs, Sheets, and Slides — via the Drive, Docs, Sheets, and Slides REST
+  APIs.
 
   AUTH: Requires a Google Cloud service account with domain-wide delegation
   enabled in Google Workspace Admin. Not suitable for personal Google accounts
   or per-user access. For individual user access, use the
   verge_labs/google_drive_oauth plugin instead.
 
-  One connection = one impersonated Workspace user's Drive.
-version: 0.1.1
+  One connection = one impersonated Workspace user's Drive. The existing
+  drive scope authorizes the Docs, Sheets, and Slides APIs too — no new
+  scope and no change to the domain-wide-delegation config are required.
+version: 0.1.3
 manifest_schema: 2
+
+# list_folder_contents, create_file and create_folder template
+# `{{args.x || config.root_folder_id || "root"}}`. The `||` coalesce operator
+# was added after v1.0.2; an older binary reads the whole expression as one
+# broken path and the verb errors at invocation time. Declaring the floor
+# turns that into a refusal at install time with an actionable message.
+#
+# 1.1.0 is the release that carries the plugin-catalog work; it is the first
+# tag containing `||`. If that number changes before tagging, change this too.
+min_daemon_version: 1.1.0
 
 config_schema:
   type: object
@@ -28,11 +42,12 @@ config_schema:
     root_folder_id:
       type: string
       description: |
-        Optional. Scope this connection to a specific folder. Paste the
-        folder ID from the Drive URL:
-          https://drive.google.com/drive/folders/<FOLDER_ID_HERE>
-        Leave blank to access the full Drive for the impersonated user.
-        Use "root" to explicitly target the My Drive root.
+        Optional. Set a base folder so the agent's default reads and new
+        files land inside it instead of the whole Drive. Paste the folder
+        ID from the folder's URL —
+          https://drive.google.com/drive/folders/<ID>
+        — the <ID> part. Leave blank to use the full Drive for the
+        impersonated user. Use "root" to explicitly target the My Drive root.
 
 credentials:
   - name: service_account_key
@@ -64,6 +79,9 @@ verbs:
       name, mimeType, modifiedTime, size, parents. For filtered results
       use search_files; for the contents of a specific folder use
       list_folder_contents.
+      Note: this lists across all of Drive regardless of the connection's
+      base folder — call list_folder_contents (no args) to browse the base
+      folder itself.
     grant_categories: [read]
     output: json
     http:
@@ -76,18 +94,20 @@ verbs:
 
   - name: list_folder_contents
     description: |
-      List the direct children of a folder. Required args: folder_id
+      List the direct children of a folder. Optional arg: folder_id
       (the Drive file ID of the folder, or "root" for My Drive root).
+      When folder_id is omitted, lists the connection's configured base
+      folder (root_folder_id), or My Drive root if none is set.
       Returns id, name, mimeType, modifiedTime, size.
     grant_categories: [read]
     args:
       folder_id:
         type: string
-        required: true
+        required: false
     output: json
     http:
       method: GET
-      url: "https://www.googleapis.com/drive/v3/files?q=%27{{args.folder_id}}%27+in+parents+and+trashed%3Dfalse&orderBy=name&pageSize=100&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true"
+      url: "https://www.googleapis.com/drive/v3/files?q=%27{{args.folder_id || config.root_folder_id || \"root\"}}%27+in+parents+and+trashed%3Dfalse&orderBy=name&pageSize=100&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true"
       headers:
         Authorization: "Bearer {{credentials.service_account_key.access_token}}"
       response:
@@ -183,9 +203,11 @@ verbs:
     description: |
       Create a new file with metadata only (no initial content). Returns
       the new file's id and webViewLink. To set content immediately,
-      follow with upload_file_content. Required args: name, mime_type,
-      parent_id (Drive folder ID to create in; pass "root" for My Drive
-      root). Common MIME types:
+      follow with upload_file_content. Required args: name, mime_type.
+      Optional arg: parent_id (Drive folder ID to create in; pass "root"
+      for My Drive root). When parent_id is omitted, the file is created
+      in the connection's configured base folder (root_folder_id), or My
+      Drive root if none is set. Common MIME types:
         text/plain, text/markdown, application/json,
         application/vnd.google-apps.document (Google Doc),
         application/vnd.google-apps.spreadsheet (Google Sheet).
@@ -199,7 +221,7 @@ verbs:
         required: true
       parent_id:
         type: string
-        required: true
+        required: false
     output: json
     http:
       method: POST
@@ -208,7 +230,7 @@ verbs:
         Authorization: "Bearer {{credentials.service_account_key.access_token}}"
         Content-Type: application/json
       body: |
-        {"name": "{{args.name}}", "mimeType": "{{args.mime_type}}", "parents": ["{{args.parent_id}}"]}
+        {"name": "{{args.name}}", "mimeType": "{{args.mime_type}}", "parents": ["{{args.parent_id || config.root_folder_id || "root"}}"]}
       response:
         success_status: [200]
 
@@ -291,9 +313,11 @@ verbs:
 
   - name: create_folder
     description: |
-      Create a new folder. Required args: name, parent_id (Drive folder
-      ID to create inside; pass "root" for My Drive root). Returns the
-      new folder's id and webViewLink.
+      Create a new folder. Required arg: name. Optional arg: parent_id
+      (Drive folder ID to create inside; pass "root" for My Drive root).
+      When parent_id is omitted, the folder is created inside the
+      connection's configured base folder (root_folder_id), or My Drive
+      root if none is set. Returns the new folder's id and webViewLink.
     grant_categories: [write]
     args:
       name:
@@ -301,7 +325,7 @@ verbs:
         required: true
       parent_id:
         type: string
-        required: true
+        required: false
     output: json
     http:
       method: POST
@@ -310,7 +334,7 @@ verbs:
         Authorization: "Bearer {{credentials.service_account_key.access_token}}"
         Content-Type: application/json
       body: |
-        {"name": "{{args.name}}", "mimeType": "application/vnd.google-apps.folder", "parents": ["{{args.parent_id}}"]}
+        {"name": "{{args.name}}", "mimeType": "application/vnd.google-apps.folder", "parents": ["{{args.parent_id || config.root_folder_id || "root"}}"]}
       response:
         success_status: [200]
 
@@ -370,6 +394,630 @@ verbs:
       response:
         success_status: [200]
 
+  # ── Google Docs (native document editing) ───────────────────────────
+  # Act on Google Docs (mimeType application/vnd.google-apps.document). Create
+  # a Doc with create_file (mime_type application/vnd.google-apps.document),
+  # then edit it here. For plain-text READING, prefer export_file — it is far
+  # simpler than doc_get. Free-text fields are *_json args: pass a JSON-encoded
+  # string (e.g. "\"Line one\\nLine two\"") because the request body is
+  # assembled as raw JSON and the engine does not escape values — a bare
+  # newline or quote in a normal string arg would corrupt the body.
+
+  - name: doc_get
+    description: |
+      Fetch the full structured content of a Google Doc by its file ID.
+      Returns the Docs API document resource — paragraphs and the character
+      indices needed for precise edits. For simply reading the text, prefer
+      export_file (Doc → text/plain); use doc_get only when you need element
+      indices. Required arg: document_id.
+    grant_categories: [read]
+    args:
+      document_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://docs.googleapis.com/v1/documents/{{args.document_id}}"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: doc_append_text
+    description: |
+      Append text to the end of a Google Doc's body. Required args:
+      document_id, text_json (the text to append, as a JSON-encoded string —
+      e.g. "\"Hello\\nWorld\"" — which preserves newlines and quotes).
+      Returns the batchUpdate reply.
+    grant_categories: [write]
+    args:
+      document_id:
+        type: string
+        required: true
+      text_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://docs.googleapis.com/v1/documents/{{args.document_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"insertText":{"endOfSegmentLocation":{},"text":{{args.text_json}}}}]}
+      response:
+        success_status: [200]
+
+  - name: doc_replace_text
+    description: |
+      Find and replace every occurrence of a literal string in a Google Doc
+      (case-sensitive). Ideal for filling placeholders in a template doc.
+      Required args: document_id, find_json (text to find, JSON-encoded
+      string), replace_json (replacement, JSON-encoded string; pass "\"\"" to
+      delete the matched text). Returns the number of replacements made.
+    grant_categories: [write]
+    args:
+      document_id:
+        type: string
+        required: true
+      find_json:
+        type: string
+        required: true
+      replace_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://docs.googleapis.com/v1/documents/{{args.document_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"replaceAllText":{"containsText":{"text":{{args.find_json}},"matchCase":true},"replaceText":{{args.replace_json}}}}]}
+      response:
+        success_status: [200]
+
+  # ── Google Sheets (spreadsheet values) ──────────────────────────────
+  # Act on Google Sheets (mimeType application/vnd.google-apps.spreadsheet).
+  # `range` is A1 notation, e.g. "Sheet1!A1:D100". Percent-encode the range if
+  # a tab name contains spaces or special characters (space→%20, '→%27) — the
+  # engine does not URL-encode. Cell data is a 2D array passed as values_json
+  # (a JSON-encoded array of rows).
+
+  - name: sheet_get
+    description: |
+      Fetch a spreadsheet's metadata: its title and the list of tabs (sheets)
+      with sheetId, title, and grid dimensions. Use this to discover tab names
+      before reading or writing ranges. Required arg: spreadsheet_id.
+    grant_categories: [read]
+    args:
+      spreadsheet_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{args.spreadsheet_id}}?fields=spreadsheetId,properties(title),sheets(properties(sheetId,title,gridProperties))"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: sheet_read_range
+    description: |
+      Read the cell values in an A1 range. Required args: spreadsheet_id,
+      range (A1 notation, e.g. "Sheet1!A1:D50"). Returns { range,
+      majorDimension, values } where values is a 2D array of rows; empty
+      trailing cells and rows are omitted.
+    grant_categories: [read]
+    args:
+      spreadsheet_id:
+        type: string
+        required: true
+      range:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{args.spreadsheet_id}}/values/{{args.range}}"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: sheet_update_range
+    description: |
+      Overwrite the cell values in an A1 range. Required args: spreadsheet_id,
+      range (the top-left anchor determines where writing begins), values_json
+      (a JSON-encoded 2D array of rows, e.g. "[[\"Name\",\"Qty\"],[\"Widget\",3]]").
+      Values are parsed as if typed into the UI — numbers, dates, and formulas
+      beginning with = are interpreted. Returns updatedCells / updatedRange.
+    grant_categories: [write]
+    args:
+      spreadsheet_id:
+        type: string
+        required: true
+      range:
+        type: string
+        required: true
+      values_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: PUT
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{args.spreadsheet_id}}/values/{{args.range}}?valueInputOption=USER_ENTERED"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"values": {{args.values_json}}}
+      response:
+        success_status: [200]
+
+  - name: sheet_append_rows
+    description: |
+      Append rows after the last row of data in the range's table. Required
+      args: spreadsheet_id, range (any A1 range touching the target table,
+      e.g. "Sheet1!A1"), values_json (JSON-encoded 2D array of rows to add).
+      New rows are inserted; existing data is not overwritten. Values are
+      parsed as if typed into the UI. Returns the append summary.
+    grant_categories: [write]
+    args:
+      spreadsheet_id:
+        type: string
+        required: true
+      range:
+        type: string
+        required: true
+      values_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{args.spreadsheet_id}}/values/{{args.range}}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"values": {{args.values_json}}}
+      response:
+        success_status: [200]
+
+  - name: sheet_clear_range
+    description: |
+      Clear the values in an A1 range (cell formatting is preserved). Required
+      args: spreadsheet_id, range. Returns the cleared range.
+    grant_categories: [write, destructive]
+    args:
+      spreadsheet_id:
+        type: string
+        required: true
+      range:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{args.spreadsheet_id}}/values/{{args.range}}:clear"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200]
+
+  - name: sheet_add_tab
+    description: |
+      Add a new tab (sheet) to a spreadsheet. Required args: spreadsheet_id,
+      title (the new tab's name — keep it simple; a double-quote in the title
+      is not supported). Returns the batchUpdate reply including the new
+      sheetId. Fails if a tab with that title already exists.
+    grant_categories: [write]
+    args:
+      spreadsheet_id:
+        type: string
+        required: true
+      title:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{args.spreadsheet_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"addSheet":{"properties":{"title":"{{args.title}}"}}}]}
+      response:
+        success_status: [200]
+
+  # ── Google Slides (presentation editing) ────────────────────────────
+  # Act on Google Slides (mimeType application/vnd.google-apps.presentation).
+  # Create a deck with create_file (mime_type application/vnd.google-apps.presentation),
+  # then edit here. Free-text fields are *_json (JSON-encoded strings), same
+  # rule as Docs.
+
+  - name: slides_get
+    description: |
+      Fetch a presentation's structure: its slides and, per slide, the page
+      elements with their objectIds and any text. Use this to enumerate slides
+      or find the objectId of a text box. Required arg: presentation_id.
+    grant_categories: [read]
+    args:
+      presentation_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://slides.googleapis.com/v1/presentations/{{args.presentation_id}}?fields=presentationId,title,slides(objectId,pageElements(objectId,shape(shapeType,text)))"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: slides_replace_text
+    description: |
+      Find and replace every occurrence of a literal string across all slides
+      (case-sensitive). Ideal for filling placeholders in a template deck.
+      Required args: presentation_id, find_json (JSON-encoded string),
+      replace_json (JSON-encoded string). Returns the number of replacements.
+    grant_categories: [write]
+    args:
+      presentation_id:
+        type: string
+        required: true
+      find_json:
+        type: string
+        required: true
+      replace_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://slides.googleapis.com/v1/presentations/{{args.presentation_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"replaceAllText":{"containsText":{"text":{{args.find_json}},"matchCase":true},"replaceText":{{args.replace_json}}}}]}
+      response:
+        success_status: [200]
+
+  - name: slides_add_slide
+    description: |
+      Append a new slide using a predefined layout. Required arg:
+      presentation_id. Optional arg: layout (one of BLANK, TITLE,
+      TITLE_AND_BODY, TITLE_ONLY, SECTION_HEADER, CAPTION_ONLY, BIG_NUMBER;
+      defaults to TITLE_AND_BODY). Returns the new slide's objectId. To fill
+      the new slide's text, read it back with slides_get, then use
+      slides_replace_text on its placeholder text.
+    grant_categories: [write]
+    args:
+      presentation_id:
+        type: string
+        required: true
+      layout:
+        type: string
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "https://slides.googleapis.com/v1/presentations/{{args.presentation_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"createSlide":{"slideLayoutReference":{"predefinedLayout":"{{args.layout || "TITLE_AND_BODY"}}"}}}]}
+      response:
+        success_status: [200]
+
+  # ── Drive: copy & comments ──────────────────────────────────────────
+  # This service-account connection has full drive access, so copy_file and
+  # the comment_* verbs work on any file the impersonated user can reach.
+
+  - name: copy_file
+    description: |
+      Make a copy of a file. Required args: file_id (the file to copy), name
+      (the copy's name). Optional arg: parent_id (destination folder; omitted →
+      the connection's base folder, or My Drive root). Returns the new file's
+      id and webViewLink. Ideal for duplicating a template (e.g. a letter or
+      invoice Doc/Sheet) before filling it in with the doc_*/sheet_* verbs.
+    grant_categories: [write]
+    args:
+      file_id:
+        type: string
+        required: true
+      name:
+        type: string
+        required: true
+      parent_id:
+        type: string
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}/copy?fields=id,name,webViewLink&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"name": "{{args.name}}", "parents": ["{{args.parent_id || config.root_folder_id || "root"}}"]}
+      response:
+        success_status: [200]
+
+  - name: comment_list
+    description: |
+      List the comments on a file (Doc, Sheet, or Slides). Required arg:
+      file_id. Returns each comment's id, content, author, createdTime,
+      resolved flag, and its replies. Use comment_reply to respond.
+    grant_categories: [read]
+    args:
+      file_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}/comments?fields=comments(id,content,author(displayName),createdTime,resolved,replies(id,content,author(displayName),createdTime))&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: comment_create
+    description: |
+      Add a new file-level comment to a file. Required args: file_id,
+      content_json (the comment text, as a JSON-encoded string). Returns the
+      new comment's id. To respond to an existing comment, use comment_reply.
+    grant_categories: [write]
+    args:
+      file_id:
+        type: string
+        required: true
+      content_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}/comments?fields=id,content,createdTime&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"content": {{args.content_json}}}
+      response:
+        success_status: [200, 201]
+
+  - name: comment_reply
+    description: |
+      Reply to an existing comment on a file. Required args: file_id,
+      comment_id (from comment_list), content_json (the reply text, as a
+      JSON-encoded string). Returns the new reply's id.
+    grant_categories: [write]
+    args:
+      file_id:
+        type: string
+        required: true
+      comment_id:
+        type: string
+        required: true
+      content_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}/comments/{{args.comment_id}}/replies?fields=id,content,createdTime&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"content": {{args.content_json}}}
+      response:
+        success_status: [200, 201]
+
+  # ── Google Docs: advanced editing ───────────────────────────────────
+  # Index-based verbs use character indices from doc_get. Free text is *_json.
+
+  - name: doc_insert_text_at
+    description: |
+      Insert text at a specific character index in a Google Doc (get indices
+      from doc_get). Required args: document_id, index (integer ≥ 1; 1 is the
+      start of the body), text_json (JSON-encoded string). To append at the
+      end instead, use doc_append_text.
+    grant_categories: [write]
+    args:
+      document_id:
+        type: string
+        required: true
+      index:
+        type: int
+        required: true
+      text_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://docs.googleapis.com/v1/documents/{{args.document_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"insertText":{"location":{"index":{{args.index}}},"text":{{args.text_json}}}}]}
+      response:
+        success_status: [200]
+
+  - name: doc_delete_range
+    description: |
+      Delete the content between two character indices in a Google Doc (get
+      indices from doc_get; the range is [start_index, end_index), end
+      exclusive). Required args: document_id, start_index, end_index. To remove
+      text by matching it instead, use doc_replace_text with an empty
+      replacement.
+    grant_categories: [write, destructive]
+    args:
+      document_id:
+        type: string
+        required: true
+      start_index:
+        type: int
+        required: true
+      end_index:
+        type: int
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://docs.googleapis.com/v1/documents/{{args.document_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"deleteContentRange":{"range":{"startIndex":{{args.start_index}},"endIndex":{{args.end_index}}}}}]}
+      response:
+        success_status: [200]
+
+  - name: doc_format_text
+    description: |
+      Apply character formatting to a range in a Google Doc. Required args:
+      document_id, start_index, end_index (from doc_get), style_json (a
+      JSON-encoded Docs TextStyle object — e.g. {"bold":true},
+      {"link":{"url":"https://example.com"}}, or
+      {"foregroundColor":{"color":{"rgbColor":{"red":1}}}}), and fields (a
+      comma-separated mask naming exactly the TextStyle fields you set — e.g.
+      "bold", "link", "foregroundColor"; use "*" to replace the whole style).
+      For paragraph-level changes like headings, this verb does not apply —
+      those use a different Docs request type not exposed here.
+    grant_categories: [write]
+    args:
+      document_id:
+        type: string
+        required: true
+      start_index:
+        type: int
+        required: true
+      end_index:
+        type: int
+        required: true
+      style_json:
+        type: string
+        required: true
+      fields:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://docs.googleapis.com/v1/documents/{{args.document_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"updateTextStyle":{"range":{"startIndex":{{args.start_index}},"endIndex":{{args.end_index}}},"textStyle":{{args.style_json}},"fields":"{{args.fields}}"}}]}
+      response:
+        success_status: [200]
+
+  # ── Google Sheets: tab management ────────────────────────────────────
+  # sheet_id is the numeric sheetId from sheet_get (not the tab's title).
+
+  - name: sheet_duplicate_tab
+    description: |
+      Duplicate a tab within a spreadsheet. Required args: spreadsheet_id,
+      sheet_id (numeric sheetId of the tab to copy, from sheet_get), new_title
+      (name for the duplicate). Returns the new tab's properties.
+    grant_categories: [write]
+    args:
+      spreadsheet_id:
+        type: string
+        required: true
+      sheet_id:
+        type: int
+        required: true
+      new_title:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{args.spreadsheet_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"duplicateSheet":{"sourceSheetId":{{args.sheet_id}},"newSheetName":"{{args.new_title}}"}}]}
+      response:
+        success_status: [200]
+
+  - name: sheet_delete_tab
+    description: |
+      Delete a tab from a spreadsheet. Required args: spreadsheet_id, sheet_id
+      (numeric sheetId from sheet_get). Permanently removes the tab and its
+      data — the spreadsheet must keep at least one tab.
+    grant_categories: [write, destructive]
+    args:
+      spreadsheet_id:
+        type: string
+        required: true
+      sheet_id:
+        type: int
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{args.spreadsheet_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"deleteSheet":{"sheetId":{{args.sheet_id}}}}]}
+      response:
+        success_status: [200]
+
+  # ── Google Slides: text insertion ───────────────────────────────────
+
+  - name: slides_insert_text
+    description: |
+      Insert text into an existing shape or text box on a slide. Required args:
+      presentation_id, object_id (the shape's objectId, from slides_get),
+      text_json (JSON-encoded string). Optional arg: insertion_index (integer
+      character offset; defaults to 0, the start of the shape's text).
+    grant_categories: [write]
+    args:
+      presentation_id:
+        type: string
+        required: true
+      object_id:
+        type: string
+        required: true
+      text_json:
+        type: string
+        required: true
+      insertion_index:
+        type: int
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "https://slides.googleapis.com/v1/presentations/{{args.presentation_id}}:batchUpdate"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"requests":[{"insertText":{"objectId":"{{args.object_id}}","insertionIndex":{{args.insertion_index || "0"}},"text":{{args.text_json}}}}]}
+      response:
+        success_status: [200]
+
 snapshot:
   description: |
     List up to 50 non-trashed files and folders visible to the
@@ -416,4 +1064,55 @@ default_rules:
   - action: external_resource.verge_labs/google_drive.trash_file
     decision: ask
   - action: external_resource.verge_labs/google_drive.share_file
+    decision: ask
+  # Google Docs
+  - action: external_resource.verge_labs/google_drive.doc_get
+    decision: allow
+  - action: external_resource.verge_labs/google_drive.doc_append_text
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.doc_replace_text
+    decision: ask
+  # Google Sheets
+  - action: external_resource.verge_labs/google_drive.sheet_get
+    decision: allow
+  - action: external_resource.verge_labs/google_drive.sheet_read_range
+    decision: allow
+  - action: external_resource.verge_labs/google_drive.sheet_update_range
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.sheet_append_rows
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.sheet_clear_range
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.sheet_add_tab
+    decision: ask
+  # Google Slides
+  - action: external_resource.verge_labs/google_drive.slides_get
+    decision: allow
+  - action: external_resource.verge_labs/google_drive.slides_replace_text
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.slides_add_slide
+    decision: ask
+  # Drive: copy & comments
+  - action: external_resource.verge_labs/google_drive.copy_file
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.comment_list
+    decision: allow
+  - action: external_resource.verge_labs/google_drive.comment_create
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.comment_reply
+    decision: ask
+  # Docs: advanced editing
+  - action: external_resource.verge_labs/google_drive.doc_insert_text_at
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.doc_delete_range
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.doc_format_text
+    decision: ask
+  # Sheets: tab management
+  - action: external_resource.verge_labs/google_drive.sheet_duplicate_tab
+    decision: ask
+  - action: external_resource.verge_labs/google_drive.sheet_delete_tab
+    decision: ask
+  # Slides: text insertion
+  - action: external_resource.verge_labs/google_drive.slides_insert_text
     decision: ask

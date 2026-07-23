@@ -2,8 +2,9 @@
 name: google_drive
 description: >
   Use when reading or writing files in a Google Drive account via a
-  hearth resource connection. Covers listing, searching, downloading,
-  uploading, and organising files through the google_drive plugin.
+  hearth resource connection — including editing the contents of native
+  Google Docs, Sheets, and Slides. Covers listing, searching, downloading,
+  uploading, organising, and editing files through the google_drive plugin.
 ---
 
 # Google Drive plugin
@@ -58,7 +59,13 @@ URL or from a previous search result):
 hearth resource invoke someones_drive list_folder_contents '{"folder_id":"1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"}'
 ```
 
-Pass `"folder_id": "root"` for the top of My Drive.
+Pass `"folder_id": "root"` for the top of My Drive. Omit `folder_id` entirely
+to list the connection's configured base folder (or My Drive root if the
+connection has none set):
+
+```
+hearth resource invoke someones_drive list_folder_contents
+```
 
 ## Reading file content
 
@@ -102,7 +109,9 @@ this for `move_file`.
 ## Creating files
 
 `create_file` creates a metadata-only record and returns the new file's `id`.
-You must supply a `parent_id`; pass `"root"` for My Drive root.
+`parent_id` is optional: omit it to create the file in the connection's
+configured base folder (or My Drive root if none is set), or pass `"root"`
+for My Drive root explicitly.
 
 ```
 # Create an empty text file
@@ -150,7 +159,8 @@ hearth resource invoke someones_drive move_file '{
 }'
 ```
 
-Create a folder:
+Create a folder (`parent_id` optional — omit it to create inside the
+connection's base folder):
 ```
 hearth resource invoke someones_drive create_folder '{"name":"2026 Reports","parent_id":"root"}'
 ```
@@ -195,6 +205,177 @@ Roles: `reader`, `commenter`, `writer`, `fileOrganizer`, `organizer`, `owner`.
 
 `email_address` is required on every `share_file` call — pass an empty string
 when `type` is `anyone`.
+
+## Editing Google Docs, Sheets & Slides
+
+Beyond storing files, this plugin edits the *contents* of native Google
+Workspace files through the Docs, Sheets, and Slides APIs. The verbs are
+prefixed by type: `doc_*`, `sheet_*`, `slides_*`.
+
+Create a native file and edit it, or edit an existing one by its ID:
+
+```
+# Create an empty Google Doc, capture its id from the response
+hearth resource invoke someones_drive create_file '{"name":"Neighbor letter","mime_type":"application/vnd.google-apps.document"}'
+# Edit it by that id
+hearth resource invoke someones_drive doc_append_text '{"document_id":"<id>","text_json":"\"Dear neighbor,\\n\\nThanks for ...\""}'
+```
+
+(create_file's `parent_id` is optional — omit it to land in the connection's
+base folder.)
+
+### The `_json` text rule — read this first
+
+Editing request bodies are assembled as raw JSON and the engine does **not**
+escape your values. So every free-text field is passed as a `_json` argument
+whose value is the **JSON encoding** of your text — i.e. run the text through a
+JSON string encoder, surrounding quotes included. The plain word `Hello`
+becomes the value `"Hello"`; multi-line text keeps its `\n` escapes. This lets
+your content carry quotes, newlines, and Unicode safely. Spreadsheet data uses
+the same rule via `values_json` (a JSON-encoded 2D array of rows).
+
+Concretely, to append the two lines `Dear neighbor,` / `Thanks for ...` you set
+`text_json` to `"Dear neighbor,\n\nThanks for ..."` — which, once that value is
+itself placed inside the argument object, appears as the doubly-escaped
+`"\"Dear neighbor,\\n\\nThanks for ...\""` shown above. When in doubt, JSON-
+encode the text once and let the argument object's own JSON quoting stack on
+top.
+
+### Google Docs
+
+To READ a Doc's text, prefer `export_file` (Doc → text/plain); use `doc_get`
+only when you need the character indices for precise edits (it returns the full
+structured document).
+
+```
+# Append text to the end of the doc
+hearth resource invoke someones_drive doc_append_text '{"document_id":"<id>","text_json":"\"\\n## Next steps\\n\""}'
+
+# Fill a placeholder throughout the doc (case-sensitive find/replace)
+hearth resource invoke someones_drive doc_replace_text '{"document_id":"<id>","find_json":"\"[[NAME]]\"","replace_json":"\"Jane Doe\""}'
+
+# Delete text by replacing it with the empty string
+hearth resource invoke someones_drive doc_replace_text '{"document_id":"<id>","find_json":"\"DRAFT — \"","replace_json":"\"\""}'
+```
+
+`doc_replace_text` is the workhorse for template documents: author a Doc with
+`[[PLACEHOLDER]]` tokens, then replace each one.
+
+### Google Sheets
+
+`range` is A1 notation, e.g. `Sheet1!A1:D100`. If a tab name contains spaces or
+punctuation, percent-encode the range (space → `%20`, `'` → `%27`); simple
+ranges need no encoding.
+
+```
+# Discover the tab names first
+hearth resource invoke someones_drive sheet_get '{"spreadsheet_id":"<id>"}'
+
+# Read a range
+hearth resource invoke someones_drive sheet_read_range '{"spreadsheet_id":"<id>","range":"Sheet1!A1:C10"}'
+
+# Overwrite a range (values_json is a JSON 2D array of rows)
+hearth resource invoke someones_drive sheet_update_range '{"spreadsheet_id":"<id>","range":"Sheet1!A1","values_json":"[[\"Item\",\"Qty\"],[\"Bolts\",40]]"}'
+
+# Append rows to the bottom of a table
+hearth resource invoke someones_drive sheet_append_rows '{"spreadsheet_id":"<id>","range":"Sheet1!A1","values_json":"[[\"Nuts\",100]]"}'
+
+# Clear a range's values (formatting is kept)
+hearth resource invoke someones_drive sheet_clear_range '{"spreadsheet_id":"<id>","range":"Sheet1!A2:C99"}'
+
+# Add a new tab
+hearth resource invoke someones_drive sheet_add_tab '{"spreadsheet_id":"<id>","title":"2026 Budget"}'
+```
+
+Values are interpreted as if typed into the UI: `42` becomes a number,
+`2026-01-01` a date, and a string starting with `=` a formula. For update and
+append, the range's top-left cell is just the anchor — you don't need to size
+the range to the data.
+
+### Google Slides
+
+```
+# Inspect slides and their element objectIds
+hearth resource invoke someones_drive slides_get '{"presentation_id":"<id>"}'
+
+# Fill placeholders across the whole deck (great for template decks)
+hearth resource invoke someones_drive slides_replace_text '{"presentation_id":"<id>","find_json":"\"{{CLIENT}}\"","replace_json":"\"The Smiths\""}'
+
+# Add a slide (layout optional; defaults to TITLE_AND_BODY)
+hearth resource invoke someones_drive slides_add_slide '{"presentation_id":"<id>","layout":"TITLE_ONLY"}'
+```
+
+To put fresh text on a new slide, add the slide, then either run
+`slides_replace_text` against its layout placeholder text, or read `slides_get`
+for the new text box's objectId. To insert into a specific shape by its
+objectId, use `slides_insert_text`:
+
+```
+hearth resource invoke someones_drive slides_insert_text '{"presentation_id":"<id>","object_id":"<shape_object_id>","text_json":"\"Q3 Results\""}'
+```
+
+### Copying files (templates)
+
+`copy_file` duplicates a file — the backbone of template workflows: keep a
+master template Doc/Sheet, copy it, then fill the copy with `doc_replace_text` /
+`sheet_update_range`.
+
+```
+hearth resource invoke someones_drive copy_file '{"file_id":"<template_id>","name":"Invoice — Smith"}'
+# then edit the returned copy's id
+```
+
+`parent_id` is optional — omit it to land in the base folder.
+
+### Comments
+
+Read a file's comment thread, add a comment, or reply to one.
+
+```
+hearth resource invoke someones_drive comment_list '{"file_id":"<id>"}'
+hearth resource invoke someones_drive comment_create '{"file_id":"<id>","content_json":"\"Looks good — one typo in para 2.\""}'
+hearth resource invoke someones_drive comment_reply '{"file_id":"<id>","comment_id":"<comment_id>","content_json":"\"Fixed, thanks.\""}'
+```
+
+Comment and reply text follow the same `_json` rule.
+
+### Precise Docs edits
+
+When append and find/replace aren't enough, edit by character index — get the
+indices from `doc_get`:
+
+```
+# Insert text at an index (1 = start of body)
+hearth resource invoke someones_drive doc_insert_text_at '{"document_id":"<id>","index":25,"text_json":"\"inserted \""}'
+
+# Delete the content in the range [start, end)
+hearth resource invoke someones_drive doc_delete_range '{"document_id":"<id>","start_index":10,"end_index":20}'
+
+# Format a range: style_json is a Docs TextStyle object, fields names what you set
+hearth resource invoke someones_drive doc_format_text '{"document_id":"<id>","start_index":1,"end_index":12,"style_json":"{\"bold\":true}","fields":"bold"}'
+hearth resource invoke someones_drive doc_format_text '{"document_id":"<id>","start_index":1,"end_index":40,"style_json":"{\"link\":{\"url\":\"https://example.com\"}}","fields":"link"}'
+```
+
+`style_json` is a raw JSON object (a Docs `TextStyle`); `fields` must name
+exactly the keys you set. This verb is character styling only — headings and
+other paragraph styles aren't exposed.
+
+### Sheets tab management
+
+`sheet_id` is the numeric id from `sheet_get` (not the tab's title):
+
+```
+hearth resource invoke someones_drive sheet_duplicate_tab '{"spreadsheet_id":"<id>","sheet_id":0,"new_title":"2027 copy"}'
+hearth resource invoke someones_drive sheet_delete_tab '{"spreadsheet_id":"<id>","sheet_id":123456}'
+```
+
+### What you can reach
+
+This connection acts as the impersonated Workspace user through a service
+account with full Drive access, so **every** verb — the `doc_*`/`sheet_*`/
+`slides_*` editors *and* the Drive-level operations (`search_files`,
+`export_file`, `download_file`, etc.) — works on any file that user can access,
+including files they created by hand.
 
 ## File IDs vs names
 
