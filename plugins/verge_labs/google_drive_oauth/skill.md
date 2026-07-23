@@ -301,7 +301,70 @@ hearth resource invoke my_drive slides_add_slide '{"presentation_id":"<id>","lay
 
 To put fresh text on a new slide, add the slide, then either run
 `slides_replace_text` against its layout placeholder text, or read `slides_get`
-for the new text box's objectId.
+for the new text box's objectId. To insert into a specific shape by its
+objectId, use `slides_insert_text`:
+
+```
+hearth resource invoke my_drive slides_insert_text '{"presentation_id":"<id>","object_id":"<shape_object_id>","text_json":"\"Q3 Results\""}'
+```
+
+### Copying files (templates)
+
+`copy_file` duplicates a file — the backbone of template workflows: keep a
+master template Doc/Sheet, copy it, then fill the copy with `doc_replace_text` /
+`sheet_update_range`.
+
+```
+hearth resource invoke my_drive copy_file '{"file_id":"<template_id>","name":"Invoice — Smith"}'
+# then edit the returned copy's id
+```
+
+`parent_id` is optional — omit it to land in the base folder. On this OAuth
+connection `copy_file` works on files **Hearth created**; to copy a template the
+user made by hand, use the service-account plugin.
+
+### Comments
+
+Read a file's comment thread, add a comment, or reply to one.
+
+```
+hearth resource invoke my_drive comment_list '{"file_id":"<id>"}'
+hearth resource invoke my_drive comment_create '{"file_id":"<id>","content_json":"\"Looks good — one typo in para 2.\""}'
+hearth resource invoke my_drive comment_reply '{"file_id":"<id>","comment_id":"<comment_id>","content_json":"\"Fixed, thanks.\""}'
+```
+
+Comment and reply text follow the same `_json` rule. On this OAuth connection,
+comments are reachable only on files **Hearth created**.
+
+### Precise Docs edits
+
+When append and find/replace aren't enough, edit by character index — get the
+indices from `doc_get`:
+
+```
+# Insert text at an index (1 = start of body)
+hearth resource invoke my_drive doc_insert_text_at '{"document_id":"<id>","index":25,"text_json":"\"inserted \""}'
+
+# Delete the content in the range [start, end)
+hearth resource invoke my_drive doc_delete_range '{"document_id":"<id>","start_index":10,"end_index":20}'
+
+# Format a range: style_json is a Docs TextStyle object, fields names what you set
+hearth resource invoke my_drive doc_format_text '{"document_id":"<id>","start_index":1,"end_index":12,"style_json":"{\"bold\":true}","fields":"bold"}'
+hearth resource invoke my_drive doc_format_text '{"document_id":"<id>","start_index":1,"end_index":40,"style_json":"{\"link\":{\"url\":\"https://example.com\"}}","fields":"link"}'
+```
+
+`style_json` is a raw JSON object (a Docs `TextStyle`); `fields` must name
+exactly the keys you set. This verb is character styling only — headings and
+other paragraph styles aren't exposed.
+
+### Sheets tab management
+
+`sheet_id` is the numeric id from `sheet_get` (not the tab's title):
+
+```
+hearth resource invoke my_drive sheet_duplicate_tab '{"spreadsheet_id":"<id>","sheet_id":0,"new_title":"2027 copy"}'
+hearth resource invoke my_drive sheet_delete_tab '{"spreadsheet_id":"<id>","sheet_id":123456}'
+```
 
 ### What you can reach
 
