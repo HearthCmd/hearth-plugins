@@ -16,7 +16,7 @@ description: |
   One connection = one impersonated Workspace user's Drive. The existing
   drive scope authorizes the Docs, Sheets, and Slides APIs too — no new
   scope and no change to the domain-wide-delegation config are required.
-version: 0.1.3
+version: 0.1.4
 manifest_schema: 2
 
 # list_folder_contents, create_file and create_folder template
