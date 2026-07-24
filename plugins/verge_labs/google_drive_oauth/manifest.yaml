@@ -529,11 +529,15 @@ verbs:
 
   - name: sheet_update_range
     description: |
-      Overwrite the cell values in an A1 range. Required args: spreadsheet_id,
-      range (the top-left anchor determines where writing begins), values_json
-      (a JSON-encoded 2D array of rows, e.g. "[[\"Name\",\"Qty\"],[\"Widget\",3]]").
-      Values are parsed as if typed into the UI — numbers, dates, and formulas
-      beginning with = are interpreted. Returns updatedCells / updatedRange.
+      Overwrite the cell values in an A1 range. Writes exactly where you point
+      it: values land at the range's top-left cell and fill right/down,
+      overwriting whatever is there. This is the reliable way to place a row at
+      a known position — to add to the bottom of a list, read the sheet first,
+      then write to the first empty row (e.g. "Sheet1!A24"). Required args:
+      spreadsheet_id, range, values_json (a JSON-encoded 2D array of rows, e.g.
+      "[[\"Name\",\"Qty\"],[\"Widget\",3]]"). Values are parsed as if typed into
+      the UI — numbers, dates, and formulas beginning with = are interpreted.
+      Returns updatedCells / updatedRange.
     grant_categories: [write]
     args:
       spreadsheet_id:
@@ -559,11 +563,17 @@ verbs:
 
   - name: sheet_append_rows
     description: |
-      Append rows after the last row of data in the range's table. Required
-      args: spreadsheet_id, range (any A1 range touching the target table,
-      e.g. "Sheet1!A1"), values_json (JSON-encoded 2D array of rows to add).
-      New rows are inserted; existing data is not overwritten. Values are
-      parsed as if typed into the UI. Returns the append summary.
+      Append rows after the last row of the table the range overlaps. CAUTION:
+      range is a table-detection HINT, not the write location — and if it
+      anchors on an EMPTY cell, the row is written into that cell instead. Pass
+      a range that overlaps existing data — ideally a whole column or column
+      span (e.g. "Sheet1!A:A" or "Sheet1!A:L") — NEVER a lone cell like
+      "Sheet1!A1", which lands in A1 whenever A1 is blank (common in matrix or
+      titled sheets). When you already know the row count from a read, prefer
+      computing the next empty row and using sheet_update_range instead.
+      Required args: spreadsheet_id, range, values_json (JSON-encoded 2D array
+      of rows). Values are parsed as if typed into the UI. Returns the append
+      summary.
     grant_categories: [write]
     args:
       spreadsheet_id:

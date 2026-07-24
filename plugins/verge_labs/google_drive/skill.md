@@ -274,11 +274,8 @@ hearth resource invoke someones_drive sheet_get '{"spreadsheet_id":"<id>"}'
 # Read a range
 hearth resource invoke someones_drive sheet_read_range '{"spreadsheet_id":"<id>","range":"Sheet1!A1:C10"}'
 
-# Overwrite a range (values_json is a JSON 2D array of rows)
-hearth resource invoke someones_drive sheet_update_range '{"spreadsheet_id":"<id>","range":"Sheet1!A1","values_json":"[[\"Item\",\"Qty\"],[\"Bolts\",40]]"}'
-
-# Append rows to the bottom of a table
-hearth resource invoke someones_drive sheet_append_rows '{"spreadsheet_id":"<id>","range":"Sheet1!A1","values_json":"[[\"Nuts\",100]]"}'
+# Overwrite a specific range (values_json is a JSON 2D array of rows)
+hearth resource invoke someones_drive sheet_update_range '{"spreadsheet_id":"<id>","range":"Sheet1!A2","values_json":"[[\"Item\",\"Qty\"],[\"Bolts\",40]]"}'
 
 # Clear a range's values (formatting is kept)
 hearth resource invoke someones_drive sheet_clear_range '{"spreadsheet_id":"<id>","range":"Sheet1!A2:C99"}'
@@ -287,10 +284,41 @@ hearth resource invoke someones_drive sheet_clear_range '{"spreadsheet_id":"<id>
 hearth resource invoke someones_drive sheet_add_tab '{"spreadsheet_id":"<id>","title":"2026 Budget"}'
 ```
 
-Values are interpreted as if typed into the UI: `42` becomes a number,
-`2026-01-01` a date, and a string starting with `=` a formula. For update and
-append, the range's top-left cell is just the anchor — you don't need to size
-the range to the data.
+`sheet_update_range` writes exactly where you point it: the values land at the
+range's top-left cell and fill right and down, overwriting whatever is there.
+Values are interpreted as if typed into the UI — `42` becomes a number,
+`2026-01-01` a date, a string starting with `=` a formula.
+
+#### Adding a row to the bottom of a list — read this trap first
+
+`sheet_append_rows` is meant for this, but its `range` is **not where the value
+is written** — the Sheets API uses it only to *find the table*, then appends
+after that table's last row. The catch that bites: **if your range anchors on an
+empty cell, the API decides there's no table there and writes the value into
+that cell.** Passing `Sheet1!A1` is the classic mistake — in any grid whose
+top-left corner is blank (a people-×-options matrix, a sheet with a title row,
+headers that start in row 2), A1 is empty and your row lands in A1, clobbering
+the corner.
+
+Two safe ways to add a row:
+
+- **Deterministic — preferred once you've read the sheet.** `sheet_read_range`
+  already told you how far the data goes; write to the next empty row
+  explicitly. If the last item sits in A23, add the new one at A24:
+  ```
+  hearth resource invoke someones_drive sheet_update_range '{"spreadsheet_id":"<id>","range":"Sheet1!A24","values_json":"[[\"New item\"]]"}'
+  ```
+- **Append with a range that overlaps the data** — give append a whole column or
+  the table's column span, never a single cell, so it can locate the real last
+  row:
+  ```
+  hearth resource invoke someones_drive sheet_append_rows '{"spreadsheet_id":"<id>","range":"Sheet1!A:A","values_json":"[[\"New item\"]]"}'
+  ```
+  Use `Sheet1!A:L` when the row spans several columns.
+
+Rule of thumb: **never anchor `sheet_append_rows` at a lone cell.** Target a
+column range that already contains data, or read the sheet and
+`sheet_update_range` at the next empty row.
 
 ### Google Slides
 
