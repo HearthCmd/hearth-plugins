@@ -6,7 +6,7 @@ description: |
   Control Home Assistant entities from agents. The daemon templates HTTP
   calls in-process — no subprocess plugin is spawned for this plugin.
   Configure with your HA instance URL and a long-lived access token.
-version: 0.2.0
+version: 0.3.0
 manifest_schema: 2
 
 config_schema:
@@ -259,4 +259,12 @@ default_rules:
   - action: external_resource.verge_labs/home_assistant.lock
     decision: ask
   - action: external_resource.verge_labs/home_assistant.unlock
+    decision: ask
+  # Speaking the answer back through a voice satellite is the whole point of the
+  # voice track — allow it by default so a granted agent can reply out loud.
+  - action: external_resource.verge_labs/home_assistant.announce
+    decision: allow
+  # start_conversation opens the satellite's mic (announce + listen), so it's more
+  # intrusive than a one-way announce — ask by default.
+  - action: external_resource.verge_labs/home_assistant.start_conversation
     decision: ask
