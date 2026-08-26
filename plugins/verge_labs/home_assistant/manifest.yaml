@@ -6,7 +6,7 @@ description: |
   Control Home Assistant entities from agents. The daemon templates HTTP
   calls in-process — no subprocess plugin is spawned for this plugin.
   Configure with your HA instance URL and a long-lived access token.
-version: 0.1.0
+version: 0.2.0
 manifest_schema: 2
 
 config_schema:
@@ -167,6 +167,57 @@ verbs:
         Content-Type: application/json
       body: |
         {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: announce
+    description: |
+      Speak a message out loud on a Home Assistant voice satellite (an
+      assist_satellite entity, e.g. assist_satellite.kitchen). Use this to
+      answer someone who spoke to a voice puck: the satellite announces the
+      message. Provide the satellite's entity_id and the message text.
+    grant_categories: [write, control]
+    args:
+      entity_id:
+        type: string
+        required: true
+      message:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/assist_satellite/announce"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "message": "{{args.message}}"}
+      response:
+        success_status: [200]
+
+  - name: start_conversation
+    description: |
+      Speak a message on a Home Assistant voice satellite AND then listen for
+      the reply, with no wake word — use for a follow-up question rather than a
+      one-way answer. Same target as announce (the satellite's entity_id).
+    grant_categories: [write, control]
+    args:
+      entity_id:
+        type: string
+        required: true
+      message:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/assist_satellite/start_conversation"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "start_message": "{{args.message}}"}
       response:
         success_status: [200]
 
