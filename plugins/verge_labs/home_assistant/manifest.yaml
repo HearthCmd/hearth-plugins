@@ -6,7 +6,7 @@ description: |
   Control Home Assistant entities from agents. The daemon templates HTTP
   calls in-process — no subprocess plugin is spawned for this plugin.
   Configure with your HA instance URL and a long-lived access token.
-version: 0.3.0
+version: 0.4.0
 manifest_schema: 2
 
 config_schema:
@@ -264,7 +264,10 @@ default_rules:
   # voice track — allow it by default so a granted agent can reply out loud.
   - action: external_resource.verge_labs/home_assistant.announce
     decision: allow
-  # start_conversation opens the satellite's mic (announce + listen), so it's more
-  # intrusive than a one-way announce — ask by default.
+  # start_conversation opens the satellite's mic (announce + listen). It's only ever
+  # invoked in reply to someone who just spoke to the agent — the natural "you asked,
+  # I answered, I'm listening for your follow-up" loop — so allow it, like announce,
+  # for seamless conversational follow-ups (voice track V3). An 'ask' here would
+  # prompt on every follow-up round and defeat the feature.
   - action: external_resource.verge_labs/home_assistant.start_conversation
-    decision: ask
+    decision: allow
