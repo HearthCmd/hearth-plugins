@@ -27,6 +27,7 @@ yet.
 | `verge_labs/google_people_oauth` | Google Contacts | OAuth | Look up family, neighbours, the plumber, the kids' school. |
 | `verge_labs/google_people` | Google People (Service Account) | Service account | Look up people in a Workspace organization. |
 | `verge_labs/home_assistant` | Home Assistant | API key | Control Home Assistant entities — lights, scenes, climate. |
+| `verge_labs/sonos` | Sonos | OAuth | Play, pause, skip, set volume, start favourites and playlists, group rooms. |
 | `verge_labs/github` | GitHub | API key | Read and write GitHub issues, pull requests, files, and commits. |
 
 Pick the **OAuth** variant unless you administer a Google Workspace domain. It
@@ -64,6 +65,38 @@ existed can actively steer away from it. So the index builder warns about any
 verb its plugin's `skill.md` never mentions, and about a plugin that has no
 `skill.md` at all. The warnings don't block a release; they print last, after
 the "wrote index.json" line. Every first-party plugin should build clean.
+
+### OAuth plugins
+
+A plugin whose upstream needs OAuth declares its endpoints on the credential:
+
+```yaml
+credentials:
+  - name: user_token
+    type: oauth2_sonos          # the suffix IS the provider slug
+    secret: true
+    oauth:
+      authorize_url: https://api.sonos.com/login/v3/oauth
+      token_url: https://api.sonos.com/login/v3/oauth/access
+      client_auth: basic        # basic (default) | form
+      # authorize_params: {access_type: offline}   # optional, upstream-specific
+    scopes: [playback-control-all]
+```
+
+That is the whole integration. The relay has one generic provider that reads
+this block; there is no per-upstream code to write.
+
+**What is not here, and cannot be:** the `client_id` and `client_secret`. Those
+identify *us* as the integration rather than the user, so they can't live in a
+public catalog and can't be handed to every host. They go in the relay's
+environment as `SONOS_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URI` —
+the presence of a `<SLUG>_OAUTH_CLIENT_ID` is what registers provider `<slug>`.
+The redirect URI must also be registered with the upstream, and points at the
+relay (`https://api.hearthcmd.com/oauth/callback/<slug>`), not at a host.
+
+So an OAuth plugin ships as a manifest here plus two secrets on the server.
+Prefer `api_key` auth when the upstream offers it — the user pastes their own
+token and nothing needs to be registered by anyone.
 
 ### Compatibility
 
