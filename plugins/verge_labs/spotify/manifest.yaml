@@ -6,10 +6,15 @@ auth_scheme: oauth2_user
 description: |
   Play music on Spotify from agents — search the catalogue and start
   something, control transport and volume, move playback between speakers,
-  queue tracks, and save what's playing. REQUIRES SPOTIFY PREMIUM: Spotify
-  refuses every playback command from a free account.
+  queue tracks, and save what's playing. REQUIRES SPOTIFY PREMIUM and a
+  one-time setup step: you register your own free Spotify app.
 
-  AUTH: Connects to your Spotify account via OAuth.
+  AUTH: Connects to your Spotify account via OAuth, using an app you
+  register yourself. Spotify allows any one registered app to serve only
+  five people, so a shared Hearth-owned app could never cover more than
+  five households. Your own app carries its own allowance of five, which
+  is a whole household — and no Spotify credential of yours ever reaches
+  Verge Labs.
 
   The Premium requirement is worth stating twice because it fails
   confusingly. Reading works on a free account — the connection looks
@@ -19,7 +24,7 @@ description: |
   Spotify has no notion of rooms. Playback happens on one ACTIVE DEVICE at
   a time — a phone, a desktop app, a Sonos speaker, a TV — and commands go
   to whichever that is. Use list_devices and transfer_playback to choose.
-version: 0.1.0
+version: 0.2.0
 manifest_schema: 2
 
 # Two features, both landing in 2.4.0:
@@ -36,7 +41,19 @@ min_daemon_version: 2.4.0
 
 config_schema:
   type: object
+  # Required so the connection cannot be created without it. begin_oauth also
+  # checks at runtime and names this field, because a wizard that submits an
+  # empty string satisfies "required" while still being unusable.
+  required: [oauth_client_id]
   properties:
+    oauth_client_id:
+      type: string
+      description: |
+        The Client ID of the Spotify app you registered (Step 3 below).
+        Required before you can connect. It is not a secret — it appears
+        in the Spotify sign-in page you are about to see — and there is
+        deliberately no Client Secret field: Hearth uses PKCE, which
+        proves each sign-in without one.
     default_device_id:
       type: string
       description: |
@@ -57,14 +74,19 @@ credentials:
     oauth:
       authorize_url: https://accounts.spotify.com/authorize
       token_url: https://accounts.spotify.com/api/token
-      # Spotify authenticates the token endpoint with HTTP Basic
-      # (base64 of client_id:client_secret). Form fields are the PKCE
-      # variant only — and PKCE must NOT be used here: it rotates the
-      # refresh token on every refresh, and the relay's generic provider
-      # stores the refresh token once at authorize time and never rewrites
-      # it. The confidential Basic flow does not rotate, which is what
-      # makes a stored refresh token keep working.
-      client_auth: basic
+      # PKCE rather than a client secret, because the app is the
+      # HOUSEHOLD'S, not ours — and a per-household client secret has
+      # nowhere honest to live. Connection config is non-sensitive by
+      # contract and echoed to clients; the secrets vault is encrypted to
+      # the host's key, which the relay (the only party that can receive
+      # the OAuth redirect) cannot read. PKCE deletes the question: a
+      # per-dance verifier replaces the secret, and the only per-household
+      # value left is a client id, which is not secret.
+      client_auth: pkce
+      # Declaring this key is what marks the plugin bring-your-own-app.
+      # The relay reads the household's client id from the connection's
+      # config under this name.
+      client_id_config_key: oauth_client_id
     scopes:
       # Spotify's scopes are fine-grained, so every one here is earned by a
       # verb below rather than requested speculatively.
@@ -88,16 +110,33 @@ credentials:
       to see and control playback, read your playlists, and save tracks to
       your library.
     wizard_guide: |
-      Sign in with the Spotify account whose music you want agents to
-      control. It must be a PREMIUM account — Spotify refuses playback
-      commands from free accounts, so pausing and skipping will fail even
-      though the connection itself looks healthy.
+      Spotify caps any single registered app at five users, and offers no
+      way past it short of 250,000 monthly actives. So instead of everyone
+      sharing one Hearth app and racing for five seats, you register your
+      own — free, about five minutes, once per household.
 
-      Spotify plays to one device at a time. Open Spotify on the speaker or
-      computer you want the house to use at least once so it appears in
-      list_devices.
-    wizard_link: https://www.spotify.com/account/
-    wizard_link_label: Spotify account
+      1. Open the Spotify Developer Dashboard and log in with the PREMIUM
+         account whose music you want agents to control. Playback commands
+         are refused on free accounts, so this has to be the Premium one.
+      2. Click "Create app". Any name and description will do — you are the
+         only person who will ever see them. Tick "Web API".
+      3. For "Redirect URI" enter exactly:
+             https://api.hearthcmd.com/oauth/callback/spotify
+         Spotify will not accept a sign-in that arrives from anywhere else,
+         so a typo here shows up later as a failed connection.
+      4. Save, then copy the Client ID into the field above. Ignore the
+         Client Secret — Hearth does not use one and never asks for it.
+      5. Anyone else in the household who wants agents controlling THEIR
+         Spotify: back in the dashboard, Settings -> User Management ->
+         Add new user, with their name and Spotify account email. Until
+         they are on that list Spotify rejects their commands. You do not
+         need to add yourself.
+
+      One last thing once you are connected: Spotify plays to one device at
+      a time, and a device only exists while its app is open. Open Spotify
+      on the speaker or computer the house should use, so it shows up.
+    wizard_link: https://developer.spotify.com/dashboard
+    wizard_link_label: Spotify Developer Dashboard
 
 # NOTE: no snapshot block, deliberately — the same reasoning as
 # verge_labs/sonos.

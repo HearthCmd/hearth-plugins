@@ -39,15 +39,21 @@ hearth resource invoke spotify play_tracks '{"track_uris_json":"[\"spotify:track
 
 ## Two things that will bite you first
 
-### 1. Playback needs Spotify Premium
+### 1. Two different 403s, and neither is retryable
 
-Every verb that *changes* anything fails on a free account with **403
-`PREMIUM_REQUIRED`**. Reading works fine, which makes this confusing: the
-connection looks healthy, `get_playback_state` answers correctly, and then
-`pause` fails.
+**`PREMIUM_REQUIRED`** — every verb that *changes* anything fails on a free
+account. Reading works fine, which makes this confusing: the connection looks
+healthy, `get_playback_state` answers correctly, and then `pause` fails. Tell
+the user their account isn't Premium.
 
-If you see that 403, stop and tell the user their Spotify account isn't
-Premium. Retrying, or trying a different verb, will not help.
+**A 403 on everything, including reads** — this connection runs on a Spotify
+app the household registered themselves, and Spotify only serves users who have
+been added to that app. Someone whose Spotify account isn't on the list gets
+rejected wholesale. The fix is a person's, not yours: whoever set the
+connection up adds them in the Spotify Developer Dashboard under
+Settings → User Management, using their Spotify account email.
+
+Neither is fixed by retrying or by trying a different verb.
 
 ### 2. There is always exactly one active device
 
@@ -278,5 +284,8 @@ for anything:
 - **400 on `play_context`** — you passed a track uri. Use `play_tracks`.
 - **429** — rate limited; a `Retry-After` header says for how long. Back off
   rather than looping.
-- **401** — the connection needs re-authorizing in the app. That's a person's
-  job, not a retry.
+- **401, or `invalid_grant` on a refresh** — the connection needs
+  re-authorizing in the app. Spotify refresh tokens now expire six months
+  after the original sign-in and refreshing does not extend that, so a
+  connection that worked for months can stop for no reason visible in the
+  house. A person has to reconnect it; there is no retry that helps.
