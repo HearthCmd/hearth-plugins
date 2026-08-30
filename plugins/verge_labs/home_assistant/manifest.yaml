@@ -6,7 +6,7 @@ description: |
   Control Home Assistant entities from agents. The daemon templates HTTP
   calls in-process — no subprocess plugin is spawned for this plugin.
   Configure with your HA instance URL and a long-lived access token.
-version: 0.4.0
+version: 0.5.0
 manifest_schema: 2
 
 config_schema:

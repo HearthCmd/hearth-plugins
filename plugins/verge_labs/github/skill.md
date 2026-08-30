@@ -108,13 +108,29 @@ hearth resource invoke github-work update_issue '{"number":42,"patch":"{\"body\"
 hearth resource invoke github-work update_issue '{"number":42,"patch":"{\"title\":\"Done\",\"labels\":[\"done\"]}"}'
 ```
 
-Prefer `close_issue` / `open_issue` for state-only changes — `update_issue`
+Prefer `close_issue` / `reopen_issue` for state-only changes — `update_issue`
 is for field edits.
 
 ## Pull requests
 
 - `head` is the branch carrying your changes; `base` is the branch you're merging into (usually `main` or `master`).
 - `create_pull_request` requires the head branch to already exist on the remote.
+
+### Reading one
+
+`list_pull_requests` returns a summary per PR. For a single PR, fetch it:
+
+```
+hearth resource invoke github-work get_pull_request '{"number":17}'
+```
+
+That adds what the list view omits and you usually need before acting:
+`mergeable` / `mergeable_state`, `draft`, the head and base SHAs, the file and
+commit counts, and `diff_url`. Fetch it before reviewing, commenting on, or
+reasoning about the state of a PR — a list entry is stale the moment someone
+pushes.
+
+The diff itself is not included; `diff_url` is a link, not content.
 
 ```
 hearth resource invoke github-work create_pull_request '{
