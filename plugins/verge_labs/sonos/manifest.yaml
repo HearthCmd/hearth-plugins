@@ -1,0 +1,714 @@
+plugin_slug: verge_labs/sonos
+namespace: verge_labs
+author: Verge Labs
+display_name: Sonos
+auth_scheme: oauth2_user
+description: |
+  Control Sonos speakers from agents — play and pause, skip, set volume,
+  start a favourite or playlist in a room, group and ungroup rooms, and
+  play a short announcement clip.
+
+  AUTH: Connects to your Sonos account via OAuth. Sonos has no supported
+  local API, so every call goes through Sonos' cloud (api.ws.sonos.com)
+  and your speakers must be online and registered to that account.
+
+  A "group" is a room or set of rooms playing together, and its id is the
+  target of nearly every command. Group ids change whenever rooms are
+  grouped or split, so list them each session rather than remembering one.
+version: 0.1.0
+manifest_schema: 2
+
+# The `||` coalesce operator (used throughout for optional args) needs 1.1.0,
+# but this plugin needs two things that land in 2.4.0:
+#
+#   - the oauth2_<provider> credential type, which an older daemon does not
+#     recognise at all — it would skip the credential and every call would go
+#     out unauthenticated;
+#   - verbatim forwarding of the credentials block, without which the `oauth:`
+#     endpoints below never reach the relay and the authorize flow has nowhere
+#     to send the user.
+#
+# Declaring the floor turns both into a refusal at install time telling the
+# operator to run `hearth update`, rather than a puzzling failure later.
+min_daemon_version: 2.4.0
+
+config_schema:
+  type: object
+  properties:
+    household_id:
+      type: string
+      description: |
+        Your Sonos household id, if you want to avoid passing it on every
+        call. Leave blank and the agent will look it up with list_households
+        (almost every account has exactly one). Fill it in only if you have
+        more than one Sonos system on the account and want to pin this
+        connection to a specific one.
+
+credentials:
+  - name: user_token
+    type: oauth2_sonos
+    secret: true
+    # The relay's generic OAuth provider is driven by this block, so adding an
+    # OAuth plugin needs no code anywhere — just this manifest, plus
+    # SONOS_OAUTH_CLIENT_ID / SONOS_OAUTH_CLIENT_SECRET / SONOS_OAUTH_REDIRECT_URI
+    # in the relay's environment. The endpoints are public documentation and
+    # belong here; the client secret is ours and stays on the relay.
+    #
+    # `type: oauth2_sonos` is what ties the three together: the daemon derives
+    # the provider slug from the suffix, and the relay looks the provider up by
+    # the same string.
+    oauth:
+      authorize_url: https://api.sonos.com/login/v3/oauth
+      token_url: https://api.sonos.com/login/v3/oauth/access
+      # Sonos authenticates the token endpoint with HTTP Basic. Sending
+      # client_id/client_secret as form fields instead returns a bare 401.
+      client_auth: basic
+    scopes:
+      # Sonos publishes exactly one scope. It is coarse — "see what's playing,
+      # change playback and volume, change rooms and groups, play favorites and
+      # playlists" — with no read-only subset available, so the narrowing that
+      # actually applies here is per-verb (grant_categories + default_rules),
+      # not per-scope.
+      - playback-control-all
+    description: |
+      Your Sonos account, connected via OAuth. Hearth will request access to
+      see and control what is playing on your speakers.
+    wizard_guide: |
+      Sign in with the Sonos account your speakers are registered to — the
+      same one you use in the Sonos app. Anyone in the household can then
+      have agents control the speakers.
+    wizard_link: https://www.sonos.com/en-us/login
+    wizard_link_label: Sonos account
+
+# NOTE: no snapshot block, deliberately.
+#
+# A snapshot enumerates entities so IAM rules can predicate on kind/labels
+# (`when: {entity_kind: ha.light}`). Sonos can't supply one usefully: the
+# enumeration lives at /households/{householdId}/groups, and snapshot
+# templates have no `args` — so it would only work for connections whose
+# operator happened to pin household_id in config, and would silently fail
+# for everyone else.
+#
+# It also buys less here than it does for Home Assistant. HA's risk axis is
+# per-entity (a light is not a door lock); Sonos' is per-verb (reading what's
+# playing is not the same as blasting an audio clip at 2am), and per-verb
+# rules need no snapshot. Groups are also short-lived — their ids change every
+# time rooms are grouped — so entity rules keyed on them would rot.
+
+verbs:
+  # ── Discovery (read) ────────────────────────────────────────────────
+  # Sonos ids are opaque and unguessable, and group ids change whenever
+  # rooms are grouped or split. These three are how everything else gets
+  # its arguments.
+
+  - name: list_households
+    description: |
+      List the Sonos systems on this account. Nearly every account has
+      exactly one; take its `id` and use it as household_id everywhere
+      else. Call this first unless the connection has household_id
+      configured.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "https://api.ws.sonos.com/control/api/v1/households"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_groups
+    description: |
+      List the rooms (groups) and speakers (players) in a household, with
+      each group's current playbackState. This is the map of the house —
+      call it before acting, because group ids change whenever rooms are
+      grouped or split. Returns `groups` (id, name, coordinatorId,
+      playerIds, playbackState) and `players` (id, name, capabilities).
+    grant_categories: [read]
+    args:
+      household_id:
+        type: string
+        required: false
+    output: json
+    http:
+      method: GET
+      url: "https://api.ws.sonos.com/control/api/v1/households/{{args.household_id || config.household_id}}/groups"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_playback_status
+    description: |
+      Read a group's transport state: playbackState (PLAYBACK_STATE_IDLE /
+      BUFFERING / PAUSED / PLAYING), position, play modes, and which
+      actions the current source allows (canSkip, canSeek, canPause).
+      Check availablePlaybackActions before skipping — radio streams have
+      no next track.
+    grant_categories: [read]
+    args:
+      group_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playback"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_playback_metadata
+    description: |
+      Read what is actually playing in a group — currentItem.track (name,
+      artist, album), nextItem, and the container it came from (playlist,
+      station, podcast). This is the verb for "what's this song?".
+    grant_categories: [read]
+    args:
+      group_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playbackMetadata"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_group_volume
+    description: |
+      Read a group's volume (0-100), muted state, and whether volume is
+      `fixed` (some line-out devices can't be adjusted — setting volume on
+      one fails).
+    grant_categories: [read]
+    args:
+      group_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/groupVolume"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_favorites
+    description: |
+      List the household's Sonos favourites — the stations, albums and
+      playlists someone saved in the Sonos app. Take an item's `id` and
+      pass it to load_favorite. Max 70 per household.
+    grant_categories: [read]
+    args:
+      household_id:
+        type: string
+        required: false
+    output: json
+    http:
+      method: GET
+      url: "https://api.ws.sonos.com/control/api/v1/households/{{args.household_id || config.household_id}}/favorites"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_playlists
+    description: |
+      List the household's Sonos playlists (playlists saved in Sonos
+      itself, not a music service's own). Take an item's `id` and pass it
+      to load_playlist.
+    grant_categories: [read]
+    args:
+      household_id:
+        type: string
+        required: false
+    output: json
+    http:
+      method: GET
+      url: "https://api.ws.sonos.com/control/api/v1/households/{{args.household_id || config.household_id}}/playlists"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  # ── Transport (write) ───────────────────────────────────────────────
+
+  - name: play
+    description: |
+      Resume playback in a group. Only resumes what is already loaded — it
+      does not choose anything to play. Use load_favorite or load_playlist
+      to start something new.
+    grant_categories: [write, playback]
+    args:
+      group_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playback/play"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200]
+
+  - name: pause
+    description: Pause playback in a group.
+    grant_categories: [write, playback]
+    args:
+      group_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playback/pause"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200]
+
+  - name: toggle_play_pause
+    description: |
+      Flip a group between playing and paused. Prefer the explicit play or
+      pause verb when you know which you want — toggling on a stale reading
+      of the state does the opposite of what was asked.
+    grant_categories: [write, playback]
+    args:
+      group_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playback/togglePlayPause"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200]
+
+  - name: skip_to_next_track
+    description: |
+      Skip to the next track in a group's queue. Fails with
+      ERROR_PLAYBACK_FAILED on sources that have no next track (radio), and
+      with ERROR_SKIP_LIMIT_REACHED where a service caps skips.
+    grant_categories: [write, playback]
+    args:
+      group_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playback/skipToNextTrack"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200]
+
+  - name: skip_to_previous_track
+    description: Skip to the previous track in a group's queue.
+    grant_categories: [write, playback]
+    args:
+      group_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playback/skipToPreviousTrack"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200]
+
+  - name: set_play_modes
+    description: |
+      Set shuffle, repeat, repeatOne and crossfade for a group. All four
+      args are optional; each defaults to leaving that mode unchanged.
+      Pass booleans (true / false), not strings.
+    grant_categories: [write, playback]
+    args:
+      group_id:
+        type: string
+        required: true
+      shuffle:
+        type: boolean
+        required: false
+      repeat:
+        type: boolean
+        required: false
+      repeat_one:
+        type: boolean
+        required: false
+      crossfade:
+        type: boolean
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playback/playMode"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      # null means "leave unchanged", which is exactly what an omitted arg
+      # should mean — so each mode coalesces to the literal null.
+      body: |
+        {"playModes": {"shuffle": {{args.shuffle || "null"}}, "repeat": {{args.repeat || "null"}}, "repeatOne": {{args.repeat_one || "null"}}, "crossfade": {{args.crossfade || "null"}}}}
+      response:
+        success_status: [200]
+
+  # ── Volume (write) ──────────────────────────────────────────────────
+
+  - name: set_group_volume
+    description: |
+      Set a group's volume to an absolute level, 0-100. Unmutes the group.
+      Read get_group_volume first — jumping to an absolute level is how you
+      deafen a room that was at 15. Prefer set_relative_group_volume for
+      "turn it up a bit".
+    grant_categories: [write, volume]
+    args:
+      group_id:
+        type: string
+        required: true
+      volume:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/groupVolume"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"volume": {{args.volume}}}
+      response:
+        success_status: [200]
+
+  - name: set_relative_group_volume
+    description: |
+      Nudge a group's volume by a delta, -100 to 100. Sonos clamps the
+      result into 0-100. This is the right verb for "louder" / "quieter" —
+      it needs no prior read and can't overshoot.
+    grant_categories: [write, volume]
+    args:
+      group_id:
+        type: string
+        required: true
+      volume_delta:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/groupVolume/relative"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"volumeDelta": {{args.volume_delta}}}
+      response:
+        success_status: [200]
+
+  - name: set_group_mute
+    description: |
+      Mute or unmute a group. Independent of volume — unmuting restores
+      whatever level was set, so mute/unmute is the safe way to silence a
+      room without losing its setting.
+    grant_categories: [write, volume]
+    args:
+      group_id:
+        type: string
+        required: true
+      muted:
+        type: boolean
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/groupVolume/mute"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"muted": {{args.muted}}}
+      response:
+        success_status: [200]
+
+  - name: set_player_volume
+    description: |
+      Set one speaker's volume, 0-100, without touching the rest of its
+      group. Use this to rebalance a grouped room (quieter in the kitchen,
+      same everywhere else); use set_group_volume for the room as a whole.
+      Fails with ERROR_COMMAND_FAILED on a player with fixed volume.
+    grant_categories: [write, volume]
+    args:
+      player_id:
+        type: string
+        required: true
+      volume:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/players/{{args.player_id}}/playerVolume"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"volume": {{args.volume}}}
+      response:
+        success_status: [200]
+
+  # ── Content (write) ─────────────────────────────────────────────────
+
+  - name: load_favorite
+    description: |
+      Start one of the household's Sonos favourites in a group. Get
+      favorite_id from list_favorites. action defaults to REPLACE (swap
+      the queue for this favourite) and play_on_completion to true (start
+      playing rather than loading silently) — those are what "put the radio
+      on in the kitchen" means. Other actions: APPEND, INSERT, INSERT_NEXT,
+      PLAY_NOW.
+    grant_categories: [write, content]
+    args:
+      group_id:
+        type: string
+        required: true
+      favorite_id:
+        type: string
+        required: true
+      action:
+        type: string
+        required: false
+      play_on_completion:
+        type: boolean
+        required: false
+      shuffle:
+        type: boolean
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/favorites"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"favoriteId": "{{args.favorite_id}}", "action": "{{args.action || "REPLACE"}}", "playOnCompletion": {{args.play_on_completion || "true"}}, "playModes": {"shuffle": {{args.shuffle || "null"}}}}
+      response:
+        success_status: [200]
+
+  - name: load_playlist
+    description: |
+      Start one of the household's Sonos playlists in a group. Get
+      playlist_id from list_playlists. Same defaults as load_favorite:
+      REPLACE the queue and start playing.
+    grant_categories: [write, content]
+    args:
+      group_id:
+        type: string
+        required: true
+      playlist_id:
+        type: string
+        required: true
+      action:
+        type: string
+        required: false
+      play_on_completion:
+        type: boolean
+        required: false
+      shuffle:
+        type: boolean
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/playlists"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"playlistId": "{{args.playlist_id}}", "action": "{{args.action || "REPLACE"}}", "playOnCompletion": {{args.play_on_completion || "true"}}, "playModes": {"shuffle": {{args.shuffle || "null"}}}}
+      response:
+        success_status: [200]
+
+  # ── Grouping (write) ────────────────────────────────────────────────
+
+  - name: create_group
+    description: |
+      Group speakers so they play together, e.g. "play this everywhere
+      downstairs". players_json is a JSON array of player ids as a STRING,
+      escaped inside the outer object. Returns the new group's id — group
+      ids change on every regrouping, so use the returned one, not a
+      remembered one.
+    grant_categories: [write, grouping]
+    args:
+      household_id:
+        type: string
+        required: false
+      players_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/households/{{args.household_id || config.household_id}}/groups/createGroup"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"playerIds": {{args.players_json}}}
+      response:
+        success_status: [200]
+
+  - name: set_group_members
+    description: |
+      Replace the full set of speakers in an existing group — this is how
+      you add a room to what's already playing, or drop one out.
+      players_json is a JSON array of player ids as a STRING and REPLACES
+      the membership, so include every player that should remain, not just
+      the ones you're adding. Removing all but one ungroups the rest.
+    grant_categories: [write, grouping]
+    args:
+      group_id:
+        type: string
+        required: true
+      players_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/groups/{{args.group_id}}/groups/setGroupMembers"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"playerIds": {{args.players_json}}}
+      response:
+        success_status: [200]
+
+  # ── Announcements (write) ───────────────────────────────────────────
+
+  - name: play_audio_clip
+    description: |
+      Play a short sound on one speaker over whatever is playing, then
+      return it to the music — a doorbell chime, or an MP3/WAV you host at
+      stream_url. Omit stream_url for Sonos' built-in chime.
+
+      This is NOT text-to-speech: there is no way to make Sonos say words.
+      To speak to the household, use a Home Assistant voice satellite
+      (verge_labs/home_assistant announce).
+
+      Only players with the AUDIO_CLIP capability support it — check
+      list_groups. volume defaults to the player's current level.
+    grant_categories: [write, announce]
+    args:
+      player_id:
+        type: string
+        required: true
+      name:
+        type: string
+        required: false
+      stream_url:
+        type: string
+        required: false
+      volume:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "https://api.ws.sonos.com/control/api/v1/players/{{args.player_id}}/audioClip"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      # appId is required by Sonos and identifies the integration, not the
+      # connection — it is ours, so it is a literal rather than an arg.
+      # streamUrl coalesces to "" and Sonos treats an empty streamUrl as
+      # "use the built-in chime".
+      body: |
+        {"appId": "com.vergelabs.hearthcmd", "name": "{{args.name || "Hearth"}}", "clipType": "CHIME", "priority": "LOW", "streamUrl": "{{args.stream_url || ""}}", "volume": {{args.volume || "null"}}}
+      response:
+        success_status: [200]
+
+default_rules:
+  # Reading what's playing is inert — allow it so an agent can answer
+  # "what's on in the kitchen?" without a prompt.
+  - action: external_resource.verge_labs/sonos.list_households
+    decision: allow
+  - action: external_resource.verge_labs/sonos.list_groups
+    decision: allow
+  - action: external_resource.verge_labs/sonos.get_playback_status
+    decision: allow
+  - action: external_resource.verge_labs/sonos.get_playback_metadata
+    decision: allow
+  - action: external_resource.verge_labs/sonos.get_group_volume
+    decision: allow
+  - action: external_resource.verge_labs/sonos.list_favorites
+    decision: allow
+  - action: external_resource.verge_labs/sonos.list_playlists
+    decision: allow
+
+  # Transport and volume are immediately audible and trivially reversible by
+  # anyone in the room — asking the phone to approve "pause the kitchen"
+  # would make the feature useless. Allow.
+  - action: external_resource.verge_labs/sonos.play
+    decision: allow
+  - action: external_resource.verge_labs/sonos.pause
+    decision: allow
+  - action: external_resource.verge_labs/sonos.toggle_play_pause
+    decision: allow
+  - action: external_resource.verge_labs/sonos.skip_to_next_track
+    decision: allow
+  - action: external_resource.verge_labs/sonos.skip_to_previous_track
+    decision: allow
+  - action: external_resource.verge_labs/sonos.set_play_modes
+    decision: allow
+  - action: external_resource.verge_labs/sonos.set_relative_group_volume
+    decision: allow
+  - action: external_resource.verge_labs/sonos.set_group_mute
+    decision: allow
+  - action: external_resource.verge_labs/sonos.set_player_volume
+    decision: allow
+  - action: external_resource.verge_labs/sonos.set_group_volume
+    decision: allow
+
+  # Starting content replaces the queue someone may have built, so it is not
+  # as cleanly reversible as a pause — but "put some music on" is the whole
+  # point of the plugin and a prompt on every play would defeat it. Allow,
+  # and let a household that disagrees narrow it.
+  - action: external_resource.verge_labs/sonos.load_favorite
+    decision: allow
+  - action: external_resource.verge_labs/sonos.load_playlist
+    decision: allow
+
+  # Grouping is the one control that changes state OTHER people are using:
+  # set_group_members replaces membership wholesale, so a careless call
+  # silently stops the music in a room nobody asked about. Ask.
+  - action: external_resource.verge_labs/sonos.create_group
+    decision: ask
+  - action: external_resource.verge_labs/sonos.set_group_members
+    decision: ask
+
+  # An audio clip interrupts the room at a volume the caller chooses, and
+  # (unlike a wrong volume) can't be un-heard. Ask.
+  - action: external_resource.verge_labs/sonos.play_audio_clip
+    decision: ask
