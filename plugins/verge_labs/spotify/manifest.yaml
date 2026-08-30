@@ -1,0 +1,671 @@
+plugin_slug: verge_labs/spotify
+namespace: verge_labs
+author: Verge Labs
+display_name: Spotify
+auth_scheme: oauth2_user
+description: |
+  Play music on Spotify from agents — search the catalogue and start
+  something, control transport and volume, move playback between speakers,
+  queue tracks, and save what's playing. REQUIRES SPOTIFY PREMIUM: Spotify
+  refuses every playback command from a free account.
+
+  AUTH: Connects to your Spotify account via OAuth.
+
+  The Premium requirement is worth stating twice because it fails
+  confusingly. Reading works on a free account — the connection looks
+  healthy and "what's playing?" answers correctly — and then every attempt
+  to change anything comes back 403 PREMIUM_REQUIRED.
+
+  Spotify has no notion of rooms. Playback happens on one ACTIVE DEVICE at
+  a time — a phone, a desktop app, a Sonos speaker, a TV — and commands go
+  to whichever that is. Use list_devices and transfer_playback to choose.
+version: 0.1.0
+manifest_schema: 2
+
+# Two features, both landing in 2.4.0:
+#
+#   - the oauth2_<provider> credential type plus verbatim forwarding of the
+#     credentials block, without which the `oauth:` endpoints below never
+#     reach the relay (as for verge_labs/sonos);
+#   - the urlquery() template helper. `search` is the verb this plugin exists
+#     for and its q carries whatever a person said. On an older daemon
+#     urlquery is an unknown function and every search hard-errors — which is
+#     the good outcome, but the version floor turns it into a clear message at
+#     install time instead.
+min_daemon_version: 2.4.0
+
+config_schema:
+  type: object
+  properties:
+    default_device_id:
+      type: string
+      description: |
+        The device to fall back to when nothing is currently active — the
+        id of the speaker this household normally listens on. Get it from
+        list_devices. Leave blank and the agent will ask which device to
+        use whenever Spotify has gone idle.
+
+credentials:
+  - name: user_token
+    type: oauth2_spotify
+    secret: true
+    # Endpoints are public documentation and belong in the catalog; the
+    # client_id/client_secret are Verge Labs' and stay in the relay's
+    # environment as SPOTIFY_OAUTH_CLIENT_ID / _CLIENT_SECRET /
+    # _REDIRECT_URI. `type: oauth2_spotify` is the string that ties the
+    # three together.
+    oauth:
+      authorize_url: https://accounts.spotify.com/authorize
+      token_url: https://accounts.spotify.com/api/token
+      # Spotify authenticates the token endpoint with HTTP Basic
+      # (base64 of client_id:client_secret). Form fields are the PKCE
+      # variant only — and PKCE must NOT be used here: it rotates the
+      # refresh token on every refresh, and the relay's generic provider
+      # stores the refresh token once at authorize time and never rewrites
+      # it. The confidential Basic flow does not rotate, which is what
+      # makes a stored refresh token keep working.
+      client_auth: basic
+    scopes:
+      # Spotify's scopes are fine-grained, so every one here is earned by a
+      # verb below rather than requested speculatively.
+      - user-read-playback-state     # get_playback_state, list_devices
+      - user-modify-playback-state   # every transport / volume / queue verb
+      - user-read-currently-playing  # get_queue requires this AND the above
+      - playlist-read-private        # list_playlists, get_playlist_items
+      - playlist-read-collaborative  # include shared playlists in the above
+      - user-library-modify          # save_to_library / remove_from_library
+      #
+      # Deliberately NOT requested:
+      #   playlist-modify-public / playlist-modify-private — see the note on
+      #   the missing add-to-playlist verb at the bottom of the verb list.
+      #   user-library-read — nothing here enumerates the library; save
+      #   operates on a uri the agent already has from get_playback_state.
+      #   user-top-read, user-read-email, user-read-private — no verb needs
+      #   them, and an OAuth consent screen should not list permissions the
+      #   integration cannot exercise.
+    description: |
+      Your Spotify account, connected via OAuth. Hearth will request access
+      to see and control playback, read your playlists, and save tracks to
+      your library.
+    wizard_guide: |
+      Sign in with the Spotify account whose music you want agents to
+      control. It must be a PREMIUM account — Spotify refuses playback
+      commands from free accounts, so pausing and skipping will fail even
+      though the connection itself looks healthy.
+
+      Spotify plays to one device at a time. Open Spotify on the speaker or
+      computer you want the house to use at least once so it appears in
+      list_devices.
+    wizard_link: https://www.spotify.com/account/
+    wizard_link_label: Spotify account
+
+# NOTE: no snapshot block, deliberately — the same reasoning as
+# verge_labs/sonos.
+#
+# A snapshot enumerates entities so IAM rules can predicate on kind/labels.
+# Spotify's nearest equivalent is the device list, and it is a poor fit twice
+# over. Devices come and go with whatever apps happen to be open, so rules
+# keyed on them would rot within a day. And the risk here does not vary by
+# device: playing music on the kitchen speaker is not more or less sensitive
+# than playing it on the study one. What varies is the VERB — reading what's
+# playing versus wiping a queue — and per-verb rules need no snapshot.
+
+verbs:
+  # ── Discovery (read) ────────────────────────────────────────────────
+
+  - name: list_devices
+    description: |
+      List the Spotify Connect devices this account can play to, with each
+      one's id, name, type, `is_active`, `supports_volume` and
+      `is_restricted`. This is the map of the house — call it before any
+      playback task, because "the kitchen speaker" is a device id here and
+      a device only appears while its app is running.
+
+      A device with `is_restricted: true` accepts no Web API commands at
+      all; say so rather than sending to it.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "https://api.spotify.com/v1/me/player/devices"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_playback_state
+    description: |
+      Read the whole player state in one call: `is_playing`, the active
+      `device`, `item` (the current track — name, artists, album, uri,
+      duration_ms), `progress_ms`, `shuffle_state`, `repeat_state`, and
+      `actions` (what the current source permits).
+
+      This is the verb for both "what's playing?" and "is anything
+      playing?". `item.uri` is where save_to_library gets its argument.
+
+      Returns 204 WITH AN EMPTY BODY when nothing is playing and no device
+      is active — that is a normal answer, not an error. Treat an empty
+      response as "Spotify is idle", which usually means the next playback
+      command needs a transfer_playback first.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "https://api.spotify.com/v1/me/player"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        # 204 is "nothing playing" and must not read as a failure.
+        success_status: [200, 204]
+
+  - name: get_queue
+    description: |
+      Read what is playing and what comes next — `currently_playing` plus
+      a `queue` array. Use it to answer "what's coming up?" and to confirm
+      an add_to_queue landed.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "https://api.spotify.com/v1/me/player/queue"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: search
+    description: |
+      Search Spotify's catalogue. `q` is free text and is percent-encoded
+      for you — pass it exactly as the person said it ("simon and
+      garfunkel", "that new Sigur Ros album"), NOT pre-escaped.
+
+      `type` is a comma-separated list of album, artist, playlist, track,
+      show, episode, audiobook; it defaults to `track`. Ask for `album` or
+      `artist` when the request is for a body of work rather than one song
+      — their uris are what play_context takes.
+
+      `limit` defaults to 10, which is also Spotify's current maximum.
+
+      Every result carries a `uri` (spotify:track:… / spotify:album:… /
+      spotify:playlist:…). That uri is the argument to play_tracks,
+      play_context or add_to_queue. Nothing here constructs a uri by hand.
+
+      Supports Spotify's field filters inside q — `artist:`, `album:`,
+      `track:`, `year:`, `genre:` — which is how you disambiguate a
+      covered song: `track:Hallelujah artist:Jeff Buckley`.
+    grant_categories: [read]
+    args:
+      q:
+        type: string
+        required: true
+      type:
+        type: string
+        required: false
+      limit:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: GET
+      # urlquery() is load-bearing, not decorative. Unescaped, an "&" in a
+      # band name silently starts a new query parameter and a "#" makes
+      # url.Parse discard everything after it.
+      url: "https://api.spotify.com/v1/search?q={{urlquery(args.q)}}&type={{args.type || \"track\"}}&limit={{args.limit || \"10\"}}"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_playlists
+    description: |
+      List this account's playlists — the ones it owns plus the ones it
+      follows. Each carries a `uri` for play_context and an `id` for
+      get_playlist_items. Returns up to 50; `offset` pages through more.
+    grant_categories: [read]
+    args:
+      offset:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: GET
+      url: "https://api.spotify.com/v1/me/playlists?limit=50&offset={{args.offset || \"0\"}}"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_playlist_items
+    description: |
+      List the tracks on a playlist — name, artists, uri and duration for
+      each. Answers "is X on my dinner playlist?" and "how long is this?".
+
+      Returns 50 at a time; page with `offset`.
+    grant_categories: [read]
+    args:
+      playlist_id:
+        type: string
+        required: true
+      offset:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: GET
+      # `fields` trims the response hard. A full playlist page is hundreds
+      # of kilobytes of album art urls and market lists, and the daemon caps
+      # a response at 1 MiB — asking for everything is how you turn a
+      # working verb into an intermittent one on long playlists.
+      url: "https://api.spotify.com/v1/playlists/{{args.playlist_id}}/items?limit=50&offset={{args.offset || \"0\"}}&fields=total,items(track(name,uri,duration_ms,artists(name),album(name)))"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  # ── Transport (write) ───────────────────────────────────────────────
+  #
+  # None of these take a device_id. Spotify accepts one as a query
+  # parameter, but the template engine cannot OMIT a parameter — an unset
+  # optional would render `?device_id=` and Spotify answers that with an
+  # error rather than ignoring it. So targeting is a separate step:
+  # transfer_playback picks the device, and everything after it lands
+  # there. That also matches how Spotify Connect actually behaves.
+
+  - name: resume
+    description: |
+      Resume whatever is loaded on the active device. Does NOT choose
+      anything to play — an idle account with an empty queue has nothing
+      to resume. Use play_context or play_tracks to start something new.
+    grant_categories: [write, playback]
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player/play"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  - name: pause
+    description: Pause playback on the active device.
+    grant_categories: [write, playback]
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player/pause"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  - name: play_context
+    description: |
+      Start a playlist, album or artist. `context_uri` is a
+      spotify:playlist:… / spotify:album:… / spotify:artist:… uri from
+      search or list_playlists.
+
+      REPLACES what is playing and clears the queue. This is the verb for
+      "put the dinner playlist on".
+
+      A TRACK uri is not a context — passing spotify:track:… here fails.
+      Use play_tracks for individual songs.
+    grant_categories: [write, playback, content]
+    args:
+      context_uri:
+        type: string
+        required: true
+      position_ms:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player/play"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"context_uri": "{{args.context_uri}}", "position_ms": {{args.position_ms || "0"}}}
+      response:
+        success_status: [200, 202, 204]
+
+  - name: play_tracks
+    description: |
+      Play one or more specific tracks. `track_uris_json` is a JSON array
+      of spotify:track:… uris, passed as a STRING and escaped inside the
+      outer argument object.
+
+      REPLACES what is playing. To add to what's already on without
+      interrupting it, use add_to_queue instead — that is almost always
+      the kinder answer to "play this next".
+    grant_categories: [write, playback, content]
+    args:
+      track_uris_json:
+        type: string
+        required: true
+      position_ms:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player/play"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"uris": {{args.track_uris_json}}, "position_ms": {{args.position_ms || "0"}}}
+      response:
+        success_status: [200, 202, 204]
+
+  - name: next_track
+    description: |
+      Skip to the next track. Check `actions.disallows` in
+      get_playback_state first — some sources disallow skipping, and
+      services cap skips on free-tier-style contexts.
+    grant_categories: [write, playback]
+    output: json
+    http:
+      method: POST
+      url: "https://api.spotify.com/v1/me/player/next"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  - name: previous_track
+    description: |
+      Skip to the previous track. As in every music player, the first
+      press usually restarts the current track rather than moving back
+      one, so "go back a song" may need two calls.
+    grant_categories: [write, playback]
+    output: json
+    http:
+      method: POST
+      url: "https://api.spotify.com/v1/me/player/previous"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  - name: seek
+    description: |
+      Jump to a position in the current track, in milliseconds from the
+      start. `position_ms` past the end of the track skips to the next
+      one. Use get_playback_state for the track's duration_ms first if the
+      request is relative ("skip the intro", "back 30 seconds").
+    grant_categories: [write, playback]
+    args:
+      position_ms:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player/seek?position_ms={{args.position_ms}}"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  - name: set_shuffle
+    description: Turn shuffle on or off. `state` is a boolean.
+    grant_categories: [write, playback]
+    args:
+      state:
+        type: boolean
+        required: true
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player/shuffle?state={{args.state}}"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  - name: set_repeat
+    description: |
+      Set repeat mode. `state` is one of `off`, `context` (repeat the
+      playlist or album) or `track` (repeat this one song) — a string, not
+      a boolean.
+    grant_categories: [write, playback]
+    args:
+      state:
+        type: string
+        required: true
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player/repeat?state={{args.state}}"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  # ── Volume (write) ──────────────────────────────────────────────────
+
+  - name: set_volume
+    description: |
+      Set the active device's volume to an absolute level, 0-100.
+
+      Spotify has no relative-volume endpoint, so "turn it up a bit" means
+      reading `device.volume_percent` from get_playback_state and adding
+      to it. Never guess an absolute level — jumping to 70 in a room that
+      was at 15 is startling, and at night genuinely unpleasant.
+
+      Fails on devices whose `supports_volume` is false (many TVs and
+      speakers exposed through Connect). Check list_devices first.
+    grant_categories: [write, volume]
+    args:
+      volume_percent:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player/volume?volume_percent={{args.volume_percent}}"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  # ── Queue and devices (write) ───────────────────────────────────────
+
+  - name: add_to_queue
+    description: |
+      Add a track or episode to the end of the queue without interrupting
+      what is playing. `uri` is a spotify:track:… uri from search.
+
+      This is the polite verb. When someone asks for a song while music is
+      already on, queueing it is almost always what they meant; play_tracks
+      would stop what everyone is listening to.
+    grant_categories: [write, playback, content]
+    args:
+      uri:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://api.spotify.com/v1/me/player/queue?uri={{urlquery(args.uri)}}"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200, 202, 204]
+
+  - name: transfer_playback
+    description: |
+      Move playback to a device — "put it on the kitchen speaker" — and
+      the way to wake Spotify when nothing is active. `device_id` comes
+      from list_devices.
+
+      `play` defaults to true (start playing on arrival). Pass false to
+      move the session without starting sound, which is what you want
+      before play_context targets a specific speaker.
+
+      Only ONE device id is accepted; Spotify plays to one place at a time.
+      Grouping several speakers is the speakers' own job (a Sonos group
+      appears here as one device).
+    grant_categories: [write, playback]
+    args:
+      device_id:
+        type: string
+        required: true
+      play:
+        type: boolean
+        required: false
+    output: json
+    http:
+      method: PUT
+      url: "https://api.spotify.com/v1/me/player"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"device_ids": ["{{args.device_id}}"], "play": {{args.play || "true"}}}
+      response:
+        success_status: [200, 202, 204]
+
+  # ── Library (write) ─────────────────────────────────────────────────
+  #
+  # NOTE: there is deliberately no add-to-playlist verb in 0.1.0.
+  #
+  # It would cost two more scopes (playlist-modify-public and
+  # playlist-modify-private) on everyone's consent screen, including the
+  # households that only ever want music played. And a playlist is a
+  # curated object, often shared — an agent appending to the wrong one is
+  # the most annoying mistake available here and the least visible, since
+  # nothing about the room changes when it happens. Saving to the library
+  # gives "I liked that" a home without any of that.
+
+  - name: save_to_library
+    description: |
+      Save tracks, albums or artists to this account's library — "like
+      this song", "follow this artist". `uris_json` is a JSON array of
+      spotify: uris, passed as a STRING and escaped inside the outer
+      argument object.
+
+      Get the uri of what's playing from get_playback_state (`item.uri`).
+    grant_categories: [write, library]
+    args:
+      uris_json:
+        type: string
+        required: true
+    output: json
+    http:
+      # PUT /me/library replaced the per-type PUT /me/tracks, /me/albums and
+      # /me/following in Spotify's February 2026 API change; the old paths
+      # are gone, not merely deprecated.
+      method: PUT
+      url: "https://api.spotify.com/v1/me/library"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"uris": {{args.uris_json}}}
+      response:
+        success_status: [200, 201, 202, 204]
+
+  - name: remove_from_library
+    description: |
+      Remove tracks, albums or artists from this account's library — the
+      undo for save_to_library. `uris_json` is a JSON array of spotify:
+      uris, passed as a STRING.
+    grant_categories: [write, library]
+    args:
+      uris_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: DELETE
+      url: "https://api.spotify.com/v1/me/library"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"uris": {{args.uris_json}}}
+      response:
+        success_status: [200, 202, 204]
+
+default_rules:
+  # Reading is inert — allow it so an agent can answer "what's this song?"
+  # without interrupting anyone for permission.
+  - action: external_resource.verge_labs/spotify.list_devices
+    decision: allow
+  - action: external_resource.verge_labs/spotify.get_playback_state
+    decision: allow
+  - action: external_resource.verge_labs/spotify.get_queue
+    decision: allow
+  - action: external_resource.verge_labs/spotify.search
+    decision: allow
+  - action: external_resource.verge_labs/spotify.list_playlists
+    decision: allow
+  - action: external_resource.verge_labs/spotify.get_playlist_items
+    decision: allow
+
+  # Transport and volume are audible the moment they happen and anyone in
+  # the room can undo them by hand. A phone prompt for "pause the music"
+  # would make the plugin useless.
+  - action: external_resource.verge_labs/spotify.resume
+    decision: allow
+  - action: external_resource.verge_labs/spotify.pause
+    decision: allow
+  - action: external_resource.verge_labs/spotify.next_track
+    decision: allow
+  - action: external_resource.verge_labs/spotify.previous_track
+    decision: allow
+  - action: external_resource.verge_labs/spotify.seek
+    decision: allow
+  - action: external_resource.verge_labs/spotify.set_shuffle
+    decision: allow
+  - action: external_resource.verge_labs/spotify.set_repeat
+    decision: allow
+  - action: external_resource.verge_labs/spotify.set_volume
+    decision: allow
+
+  # Queueing and starting music are the point of the plugin. Starting
+  # something does replace a queue someone may have built, but prompting
+  # for "put some music on" defeats the feature — allow, and let a
+  # household that disagrees narrow it.
+  - action: external_resource.verge_labs/spotify.add_to_queue
+    decision: allow
+  - action: external_resource.verge_labs/spotify.play_context
+    decision: allow
+  - action: external_resource.verge_labs/spotify.play_tracks
+    decision: allow
+
+  # Unlike Sonos, where each room is independent and regrouping disturbs
+  # people who did not ask for anything, a Spotify account has exactly one
+  # playback session. Transferring it can only ever move the listener's own
+  # music, so it does not warrant a prompt.
+  - action: external_resource.verge_labs/spotify.transfer_playback
+    decision: allow
+
+  # Saving is additive and reversible.
+  - action: external_resource.verge_labs/spotify.save_to_library
+    decision: allow
+
+  # Removing is the one verb here that destroys something the person chose
+  # to keep, and nothing in the room signals that it happened. Ask.
+  - action: external_resource.verge_labs/spotify.remove_from_library
+    decision: ask
