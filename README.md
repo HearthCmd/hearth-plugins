@@ -57,6 +57,14 @@ plugins/<namespace>/<name>/
 The directory path must equal the manifest's `plugin_slug`. The index builder
 and the daemon both enforce this.
 
+`skill.md` is optional in the format, but in practice a verb with no skill
+coverage is a verb agents use wrong — it reaches them as a bare name with no
+example and no warning about its traps, and a skill written before the verb
+existed can actively steer away from it. So the index builder warns about any
+verb its plugin's `skill.md` never mentions, and about a plugin that has no
+`skill.md` at all. The warnings don't block a release; they print last, after
+the "wrote index.json" line. Every first-party plugin should build clean.
+
 ### Compatibility
 
 A manifest may declare `min_daemon_version`. It means "this plugin needs a

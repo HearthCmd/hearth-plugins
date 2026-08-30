@@ -24,6 +24,7 @@ Usage:
 import hashlib
 import json
 import os
+import re
 import sys
 
 try:
@@ -139,6 +140,48 @@ def validate_verbs(slug, manifest):
             sys.exit("%s: verb %r is missing http.url" % (slug, name))
 
 
+def check_skill_coverage(slug, manifest, plugin_dir):
+    """Report verbs the plugin's skill.md never mentions.
+
+    A verb reaches an agent as a name in a list and nothing more. skill.md is
+    the only place it gets an example, an argument shape, or a warning about
+    the trap in it — so a verb the skill doesn't mention is one the agent will
+    either ignore or use wrong. Worse, a skill written before the verb existed
+    often steers *away* from it: google_calendar_oauth's datetime rules told
+    agents every datetime needs an offset for months after create_all_day_event
+    shipped needing plain dates.
+
+    Nothing else catches this. Adding a verb touches only manifest.yaml, and
+    the index builder happily publishes and signs the result.
+
+    Warns rather than fails. skill.md is documented as optional and a release
+    shouldn't be blocked on prose — but main() re-prints these at the end, so
+    a warning can't quietly scroll past in a long build.
+    """
+    warnings = []
+    verbs = [v.get("name") for v in (manifest.get("verbs") or [])
+             if isinstance(v, dict) and v.get("name")]
+    if not verbs:
+        return warnings
+
+    skill_path = os.path.join(plugin_dir, "skill.md")
+    if not os.path.isfile(skill_path):
+        warnings.append("%s: no skill.md — %d verbs ship with no agent "
+                        "guidance at all" % (slug, len(verbs)))
+        return warnings
+
+    with open(skill_path) as f:
+        skill = f.read()
+
+    # Word-boundary match so `lock` doesn't count as covered by `unlock`.
+    missing = [v for v in verbs
+               if not re.search(r"\b%s\b" % re.escape(v), skill)]
+    if missing:
+        warnings.append("%s: skill.md never mentions %s"
+                        % (slug, ", ".join(missing)))
+    return warnings
+
+
 def build_entry(slug, plugin_dir):
     with open(os.path.join(plugin_dir, "manifest.yaml")) as f:
         manifest = yaml.safe_load(f)
@@ -188,7 +231,7 @@ def build_entry(slug, plugin_dir):
         entry["auth_scheme"] = manifest["auth_scheme"]
     if manifest.get("min_daemon_version"):
         entry["min_daemon_version"] = str(manifest["min_daemon_version"])
-    return entry
+    return entry, check_skill_coverage(slug, manifest, plugin_dir)
 
 
 def main():
@@ -198,8 +241,10 @@ def main():
     out_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(REPO_ROOT, "index.json")
 
     plugins = {}
+    skill_warnings = []
     for slug, plugin_dir in discover_plugins():
-        plugins[slug] = build_entry(slug, plugin_dir)
+        plugins[slug], warnings = build_entry(slug, plugin_dir)
+        skill_warnings.extend(warnings)
 
     if not plugins:
         sys.exit("no plugins found under %s" % PLUGINS_DIR)
@@ -216,6 +261,13 @@ def main():
 
     print("wrote %s (%d plugins, catalog_version=%s)"
           % (out_path, len(plugins), catalog_version))
+
+    # Last thing on screen, so it's still visible when the release script
+    # hands back. These don't block the build — see check_skill_coverage.
+    if skill_warnings:
+        print("\nskill coverage warnings (%d):" % len(skill_warnings))
+        for w in skill_warnings:
+            print("  " + w)
 
 
 if __name__ == "__main__":
