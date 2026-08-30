@@ -28,7 +28,28 @@ yet.
 | `verge_labs/google_people` | Google People (Service Account) | Service account | Look up people in a Workspace organization. |
 | `verge_labs/home_assistant` | Home Assistant | API key | Control Home Assistant entities — lights, scenes, climate. |
 | `verge_labs/sonos` | Sonos | OAuth | Play, pause, skip, set volume, start favourites and playlists, group rooms. |
+| `verge_labs/spotify` | Spotify | OAuth (your own app) | Search Spotify and play it, control transport and volume, move playback between devices. |
+| `verge_labs/home_assistant_music_assistant` | Music Assistant | API key | Play music by name on any speaker Home Assistant drives, per-room volume, grouping, move music between rooms. |
 | `verge_labs/github` | GitHub | API key | Read and write GitHub issues, pull requests, files, and commits. |
+
+### Three ways to play music
+
+They overlap, and the right one depends on what the house already runs.
+
+- **Music Assistant** is the one to reach for if Home Assistant is already in
+  the house. It is provider-agnostic — whatever Music Assistant is connected to
+  is reachable — plays by name with no search step, drives any speaker HA can
+  drive, and needs nothing but the HA token you may already have.
+- **Sonos** talks to Sonos' own cloud. Use it when the speakers are Sonos and
+  there is no Home Assistant. It can only start things already saved as Sonos
+  favourites or playlists — there is no search.
+- **Spotify** is the only one with the full Spotify catalogue and search, but
+  it needs Spotify Premium and a one-time setup where you register your own
+  free Spotify app (Spotify serves five users per app, so a shared one could
+  never cover more than five households).
+
+If Home Assistant is running and Music Assistant is installed on it, that plugin
+is usually the least friction and the widest reach.
 
 Pick the **OAuth** variant unless you administer a Google Workspace domain. It
 connects as a single ordinary Google account and needs no domain-wide

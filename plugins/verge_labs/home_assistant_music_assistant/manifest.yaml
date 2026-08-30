@@ -1,0 +1,727 @@
+plugin_slug: verge_labs/home_assistant_music_assistant
+namespace: verge_labs
+author: Verge Labs
+display_name: Music Assistant (Home Assistant)
+description: |
+  Play music around the house through Music Assistant on Home Assistant —
+  ask for an artist, album or playlist by name, control transport and
+  volume per room, group speakers, and move what's playing from one room
+  to another.
+
+  REQUIRES the Music Assistant integration to already be set up in Home
+  Assistant. This plugin talks to your HA instance; Music Assistant is
+  what turns "play something by Big Thief" into audio.
+
+  Unlike a music service's own plugin, this one is provider-agnostic:
+  whatever Music Assistant is connected to — Spotify, a local library,
+  radio — is reachable through the same verbs, and playback lands on
+  whatever speakers HA can drive.
+version: 0.1.0
+manifest_schema: 2
+
+# Only the `||` coalesce operator, which landed in 1.1.0. No OAuth and no
+# urlquery(), so unlike the Sonos and Spotify plugins this one needs nothing
+# from a newer daemon — it runs on the fleet as it stands.
+min_daemon_version: 1.1.0
+
+config_schema:
+  type: object
+  required: [ha_url]
+  properties:
+    ha_url:
+      type: string
+      description: |
+        Base URL of your Home Assistant instance, including scheme and
+        port. Example: http://homeassistant.local:8123
+    config_entry_id:
+      type: string
+      description: |
+        The Music Assistant integration's entry id, needed ONLY by the
+        search and browse_library verbs — everything else works without
+        it. Find it in Home Assistant: Settings → Devices & Services →
+        Music Assistant, click the entry, and copy the long id from the
+        browser's address bar (it looks like 01JEXNDHT21V0BHJXM7A5SZANV).
+
+        Leave it blank and playback still works fully: Music Assistant
+        resolves names passed to play_media on its own.
+
+credentials:
+  - name: ha_token
+    description: |
+      Long-lived access token. In Home Assistant, go to your profile →
+      Security → Long-Lived Access Tokens.
+    secret: true
+    wizard_guide: |
+      Use the same kind of token as any other Home Assistant connection:
+      your profile page in HA, at the bottom, "Create Token".
+
+      The token inherits YOUR permissions in Home Assistant, so it can
+      reach far more than music. If that matters, make a dedicated HA
+      user for Hearth first and create the token as them.
+    wizard_link: https://www.home-assistant.io/docs/authentication/
+    wizard_link_label: Home Assistant tokens
+
+verbs:
+  # ── Discovery (read) ────────────────────────────────────────────────
+
+  - name: list_players
+    description: |
+      Return every entity Home Assistant exposes, with state and
+      attributes. The speakers are the `media_player.*` ones — filter for
+      those; Music Assistant's players appear among them alongside any
+      other media players HA knows about.
+
+      Each media player carries the fields the rest of this plugin needs:
+      `entity_id`, `friendly_name`, `state` (playing / paused / idle /
+      off), `volume_level` (0.0-1.0), `group_members`, and when something
+      is playing, `media_title` and `media_artist`.
+
+      This returns the WHOLE entity list, which on a large installation is
+      big. Prefer get_player once you know which speaker you want.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "{{config.ha_url}}/api/states"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_player
+    description: |
+      Read one speaker's full state: whether it is playing, what is
+      playing (media_title, media_artist, media_album_name),
+      `volume_level` as a fraction from 0.0 to 1.0, `is_volume_muted`,
+      `shuffle`, `repeat`, and `group_members` when it is grouped with
+      other speakers.
+
+      This is the verb for "what's playing in the kitchen?" and the one to
+      read before changing volume.
+    grant_categories: [read]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "{{config.ha_url}}/api/states/{{args.entity_id}}"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_queue
+    description: |
+      Read what a player is playing now and what comes next —
+      `current_item` and `next_item` with their names and metadata. Use it
+      to answer "what's after this?" and to confirm an enqueue landed.
+    grant_categories: [read]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      # ?return_response is not optional decoration. get_queue is a
+      # response-ONLY service, and Home Assistant answers 400 to a call
+      # that omits it — the request looks fine and simply fails.
+      url: "{{config.ha_url}}/api/services/music_assistant/get_queue?return_response"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: search
+    description: |
+      Search everything Music Assistant can reach — the local library and
+      every streaming provider it is connected to. Results come back
+      GROUPED BY TYPE: `artists`, `albums`, `tracks`, `playlists`,
+      `radio`, `audiobooks`, `podcasts`, each item carrying a `name` and a
+      `uri`.
+
+      That uri is the precise way to play something: pass it to play_media
+      and there is no ambiguity about which "Hallelujah" was meant.
+
+      `limit` is per type and defaults to 5. `library_only` restricts to
+      music already in the library rather than the streaming providers.
+
+      Requires config_entry_id on the connection. Playing by NAME needs no
+      search at all — reach for this when a name is ambiguous, when the
+      user wants to choose, or when you need to know whether something
+      exists before promising it.
+    grant_categories: [read]
+    args:
+      name:
+        type: string
+        required: true
+      limit:
+        type: integer
+        required: false
+      library_only:
+        type: boolean
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/music_assistant/search?return_response"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      # No media_type key. It is optional upstream, but the validator turns
+      # an absent-looking value into an EMPTY type list rather than "all
+      # types" — which searches for nothing and returns nothing. Since the
+      # template engine cannot omit a key, the safe move is never to send
+      # one and let the search span every type, which is also the more
+      # useful answer.
+      #
+      # config_entry_id is deliberately NOT coalesced: an unset path is a
+      # hard template error naming `config.config_entry_id`, which is a far
+      # better failure than sending "" and getting Home Assistant's
+      # "config entry not found".
+      body: |
+        {"config_entry_id": "{{config.config_entry_id}}", "name": "{{args.name}}", "limit": {{args.limit || "5"}}, "library_only": {{args.library_only || "false"}}}
+      response:
+        success_status: [200]
+
+  - name: browse_library
+    description: |
+      List what is in the library for one media type — "what albums do we
+      have?", "show me the playlists". `media_type` is required and is one
+      of artist, album, track, playlist, radio, audiobook, podcast.
+
+      `search` narrows within the library by name; `order_by` takes name,
+      year or random; `limit` defaults to 25 and `offset` pages.
+
+      Requires config_entry_id on the connection. This is the LIBRARY —
+      music already collected — where search reaches the streaming
+      providers too.
+    grant_categories: [read]
+    args:
+      media_type:
+        type: string
+        required: true
+      search:
+        type: string
+        required: false
+      limit:
+        type: integer
+        required: false
+      offset:
+        type: integer
+        required: false
+      order_by:
+        type: string
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/music_assistant/get_library?return_response"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      # Every optional field here defaults to a value the upstream schema
+      # accepts. `favorite` and `album_artists_only` are omitted entirely:
+      # both are booleans whose false value is a FILTER, not "unset", so a
+      # default of false would quietly return the wrong half of the library.
+      body: |
+        {"config_entry_id": "{{config.config_entry_id}}", "media_type": "{{args.media_type}}", "search": "{{args.search || ""}}", "limit": {{args.limit || "25"}}, "offset": {{args.offset || "0"}}, "order_by": "{{args.order_by || "name"}}"}
+      response:
+        success_status: [200]
+
+  # ── Playing something (write) ───────────────────────────────────────
+
+  - name: play_media
+    description: |
+      Play something on a speaker. This is the verb the plugin exists for.
+
+      `media_id` is either a NAME ("Big Thief", "Dragon New Warm Mountain",
+      "brown eyed girl") or a `uri` from search. Music Assistant resolves
+      names itself, so "play some Big Thief in the kitchen" needs no
+      lookup first. Use a uri when the name is ambiguous or the user picked
+      from search results.
+
+      `enqueue` decides what happens to what is already playing:
+        play         start it now, keeping the rest of the queue (default)
+        replace      clear the queue and play this instead
+        next         play it after the current track
+        replace_next replace what is queued next
+        add          append to the end of the queue
+
+      `radio_mode` turns the selection into an endless similar-music
+      station rather than playing just that item.
+
+      To force a KIND of thing — the album rather than the song — search
+      first and pass its uri. There is deliberately no media_type argument:
+      upstream it cannot be left unset once sent, and a wrong guess is
+      worse than letting Music Assistant work it out.
+    grant_categories: [write, playback, content]
+    args:
+      entity_id:
+        type: string
+        required: true
+      media_id:
+        type: string
+        required: true
+      enqueue:
+        type: string
+        required: false
+      radio_mode:
+        type: boolean
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/music_assistant/play_media"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "media_id": "{{args.media_id}}", "enqueue": "{{args.enqueue || "play"}}", "radio_mode": {{args.radio_mode || "false"}}}
+      response:
+        success_status: [200]
+
+  # ── Transport (write) ───────────────────────────────────────────────
+
+  - name: play
+    description: |
+      Resume a paused speaker. Starts nothing on its own — an idle player
+      with an empty queue has nothing to resume, so "put some music on"
+      is play_media.
+    grant_categories: [write, playback]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/media_play"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: pause
+    description: Pause a speaker.
+    grant_categories: [write, playback]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/media_pause"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: next_track
+    description: Skip to the next track in a speaker's queue.
+    grant_categories: [write, playback]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/media_next_track"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: previous_track
+    description: |
+      Go back in a speaker's queue. As in every music player the first
+      call usually restarts the current track rather than moving back one,
+      so "go back a song" may take two.
+    grant_categories: [write, playback]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/media_previous_track"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: seek
+    description: |
+      Jump to a position in the current track. `position_seconds` counts
+      from the START of the track, so a relative request ("skip the
+      intro", "back 30 seconds") needs media_position from get_player
+      first.
+    grant_categories: [write, playback]
+    args:
+      entity_id:
+        type: string
+        required: true
+      position_seconds:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/media_seek"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "seek_position": {{args.position_seconds}}}
+      response:
+        success_status: [200]
+
+  - name: set_shuffle
+    description: Turn shuffle on or off for a speaker. `shuffle` is a boolean.
+    grant_categories: [write, playback]
+    args:
+      entity_id:
+        type: string
+        required: true
+      shuffle:
+        type: boolean
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/shuffle_set"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "shuffle": {{args.shuffle}}}
+      response:
+        success_status: [200]
+
+  - name: set_repeat
+    description: |
+      Set repeat mode. `repeat` is a STRING — one of `off`, `one` (repeat
+      this track) or `all` (repeat the queue). Not a boolean.
+    grant_categories: [write, playback]
+    args:
+      entity_id:
+        type: string
+        required: true
+      repeat:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/repeat_set"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "repeat": "{{args.repeat}}"}
+      response:
+        success_status: [200]
+
+  # ── Volume (write) ──────────────────────────────────────────────────
+
+  - name: set_volume
+    description: |
+      Set a speaker's volume. `volume_level` is a FRACTION FROM 0.0 TO
+      1.0, not a percentage — 0.35 is a normal listening level and 35 is
+      not a valid value.
+
+      There is no relative-volume service, so "turn it up a bit" means
+      reading volume_level from get_player and adding to it; about 0.1 is
+      a sensible step. Never jump to a level you picked yourself.
+    grant_categories: [write, volume]
+    args:
+      entity_id:
+        type: string
+        required: true
+      volume_level:
+        type: number
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/volume_set"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "volume_level": {{args.volume_level}}}
+      response:
+        success_status: [200]
+
+  - name: set_mute
+    description: |
+      Mute or unmute a speaker. Independent of volume, so unmuting
+      restores whatever level was set — this is the safe way to silence a
+      room without losing its setting.
+    grant_categories: [write, volume]
+    args:
+      entity_id:
+        type: string
+        required: true
+      muted:
+        type: boolean
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/volume_mute"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "is_volume_muted": {{args.muted}}}
+      response:
+        success_status: [200]
+
+  - name: turn_off
+    description: |
+      Turn a speaker off entirely, rather than pausing it. Use pause for
+      "stop the music" — this is for "shut the speaker down".
+    grant_categories: [write, playback]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/turn_off"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  # ── Multi-room (write) ──────────────────────────────────────────────
+
+  - name: transfer_queue
+    description: |
+      Move what is playing from one speaker to another — "I'm going
+      upstairs, bring the music". `entity_id` is where the music is going
+      TO; `source_player` is where it is coming FROM.
+
+      source_player is required here even though Music Assistant would
+      otherwise guess "whichever player is playing". In a house with
+      several rooms going at once that guess is a coin flip, and the
+      wrong answer silences someone who asked for nothing.
+
+      `auto_play` defaults to true so the music actually continues.
+    grant_categories: [write, playback, grouping]
+    args:
+      entity_id:
+        type: string
+        required: true
+      source_player:
+        type: string
+        required: true
+      auto_play:
+        type: boolean
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/music_assistant/transfer_queue"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "source_player": "{{args.source_player}}", "auto_play": {{args.auto_play || "true"}}}
+      response:
+        success_status: [200]
+
+  - name: join_players
+    description: |
+      Group speakers so they play together — "put this on everywhere
+      downstairs". `entity_id` is the LEADER, whose music the others
+      follow; `members_json` is a JSON array of the entity_ids joining
+      it, passed as a STRING and escaped inside the outer object.
+
+      The members stop whatever they were playing. That is why this asks
+      for approval by default.
+    grant_categories: [write, grouping]
+    args:
+      entity_id:
+        type: string
+        required: true
+      members_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/join"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "group_members": {{args.members_json}}}
+      response:
+        success_status: [200]
+
+  - name: unjoin_player
+    description: |
+      Remove one speaker from its group, leaving the rest playing. The
+      speaker stops. Check group_members from get_player first so you know
+      what the group currently is.
+    grant_categories: [write, grouping]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/media_player/unjoin"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  # ── Announcements (write) ───────────────────────────────────────────
+
+  - name: play_announcement
+    description: |
+      Play a sound on a speaker over whatever is playing, then return to
+      the music. `url` points at an audio file Home Assistant can reach.
+
+      This is NOT text-to-speech. To SPEAK to the household, use a Home
+      Assistant voice satellite (verge_labs/home_assistant, the announce
+      verb) — that is what it is for.
+
+      `use_pre_announce` plays a chime first so the room knows something
+      is coming. Volume is the player's own; there is deliberately no
+      override, since a wrong announcement volume cannot be un-heard.
+    grant_categories: [write, announce]
+    args:
+      entity_id:
+        type: string
+        required: true
+      url:
+        type: string
+        required: true
+      use_pre_announce:
+        type: boolean
+        required: false
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/music_assistant/play_announcement"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}", "url": "{{args.url}}", "use_pre_announce": {{args.use_pre_announce || "false"}}}
+      response:
+        success_status: [200]
+
+snapshot:
+  description: |
+    Enumerate Home Assistant entities so IAM rules can predicate on kind
+    and area — e.g. allow music only on media players, or only downstairs.
+    Same endpoint and shape as the base Home Assistant plugin, so rules
+    written for one read the same way on the other.
+  http:
+    method: GET
+    url: "{{config.ha_url}}/api/states"
+    headers:
+      Authorization: "Bearer {{credentials.ha_token}}"
+    response:
+      success_status: [200]
+  extract:
+    iterate: $[*]
+    entity_id: $.entity_id
+    kind:
+      prefix_with_entity_domain: "ha."
+    labels:
+      friendly_name: $.attributes.friendly_name
+      area: $.attributes.area_id
+
+default_rules:
+  # Reading is inert — an agent should be able to answer "what's playing?"
+  # without interrupting anyone for permission.
+  - action: external_resource.verge_labs/home_assistant_music_assistant.list_players
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.get_player
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.get_queue
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.search
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.browse_library
+    decision: allow
+
+  # Transport and volume are audible the moment they happen and anyone in
+  # the room can undo them by hand. Prompting for "pause the kitchen" would
+  # make the plugin useless.
+  - action: external_resource.verge_labs/home_assistant_music_assistant.play
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.pause
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.next_track
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.previous_track
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.seek
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.set_shuffle
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.set_repeat
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.set_volume
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.set_mute
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant_music_assistant.turn_off
+    decision: allow
+
+  # Putting music on is the point of the plugin.
+  - action: external_resource.verge_labs/home_assistant_music_assistant.play_media
+    decision: allow
+
+  # Moving the music is deliberate on both ends — the agent names the room it
+  # comes from and the room it goes to — and "bring the music with me" is a
+  # signature Music Assistant behaviour. Allow.
+  - action: external_resource.verge_labs/home_assistant_music_assistant.transfer_queue
+    decision: allow
+
+  # Grouping is the one control that changes rooms nobody asked about: joining
+  # stops whatever the members were playing, unjoining silences one of them.
+  # Ask, matching verge_labs/sonos.
+  - action: external_resource.verge_labs/home_assistant_music_assistant.join_players
+    decision: ask
+  - action: external_resource.verge_labs/home_assistant_music_assistant.unjoin_player
+    decision: ask
+
+  # An announcement interrupts a room and cannot be un-heard. Ask.
+  - action: external_resource.verge_labs/home_assistant_music_assistant.play_announcement
+    decision: ask
