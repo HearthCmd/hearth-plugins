@@ -87,6 +87,19 @@ verb its plugin's `skill.md` never mentions, and about a plugin that has no
 `skill.md` at all. The warnings don't block a release; they print last, after
 the "wrote index.json" line. Every first-party plugin should build clean.
 
+`skill.md`'s `description` frontmatter does double duty. Beyond steering an
+agent that *already has* the plugin, it is the canonical capability summary a
+**discovery agent** reads to decide whether this plugin fits a need it is trying
+to solve — when we one day index the catalog for such agents to search, this is
+the text they will search and then read. Write it so a reasoner with no prior
+knowledge of the service can tell **what the plugin is for and which problems it
+solves**, not only which verbs it exposes. Lead with the real-world scenarios
+("scheduling meetings," "putting music on in a room," "saving energy by turning
+things off") — a keyword search for a household problem should land here. The
+`manifest.description` stays the mechanics/setup blurb; the two do not need to
+repeat each other, and a plugin needs no separate "discovery" block — this
+frontmatter is it.
+
 ### OAuth plugins
 
 A plugin whose upstream needs OAuth declares its endpoints on the credential:
